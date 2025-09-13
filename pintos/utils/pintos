@@ -123,11 +123,11 @@ class Pintos(object):
             if self.bdevs.get(d, None):
                 cmd.extend(['-drive',
                             'file={},format=raw,index={},media=disk'
-                           .format(self.bdevs[d], idx)])
+                            .format(self.bdevs[d], idx)])
         for idx, mnt in enumerate(self.mnts):
             cmd.extend(['-drive',
                         'file={},format=raw,index={},media=disk'
-                       .format(mnt, 4 + idx)])
+                        .format(mnt, 4 + idx)])
 
         cmd.extend(['-cpu', 'qemu64'])
         cmd.extend(['-m', str(self.mem)])
@@ -175,14 +175,13 @@ class Pintos(object):
 
 if __name__ == '__main__':
     import argparse
-
     parser = argparse.ArgumentParser(
-        description='a utility for running Pintos in a simulator')
+            description='a utility for running Pintos in a simulator')
     parser.add_argument('-v', '--no-vga', action='store_true', default=True,
                         help='No VGA display or keyboard')
     parser.add_argument('-k', '--kill-on-failure', action='store_true',
                         help='Kill Pintos a few seconds after a kernel or user'
-                             'panic, test failure, or triple fault (deprecated)')
+                        'panic, test failure, or triple fault (deprecated)')
     parser.add_argument('-T', '--timeout', type=int, default=0,
                         help='Kill Pintos after N seconds CPU time')
 
