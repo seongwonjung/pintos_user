@@ -145,28 +145,40 @@ static bool wake_less(const struct list_elem *a, const struct list_elem *b,
   return ta->priority > tb->priority;  // 같은 시간 => 우선 순위 '높은게' 앞
 }
 
-// 1️⃣ 스레드 깨우기
-static void wake_sleepers(void) {
-  int64_t now = timer_ticks();  // 지금 시각(현재 전체 틱 수)
-  bool need_preempt = false;
 
-  while (!list_empty(&sleep_list)) {
-    struct thread *t = list_entry(list_front(&sleep_list), struct thread,
-                                  elem);  // 맨 앞 깨울 스레드
-    if (t->wakeup_tick > now) break;      // IF, 깨울 시각 전 -> 종료
-    list_pop_front(&sleep_list);  // 깨울 시간 다 됨 -> 맨 앞 스레드 pop
-    thread_unblock(
-        t);  // 스레드 t를 BLOCKED → READY 상태로 바꿈(레디 큐에 넣음)
-    // 현재보다 높은 우선순위를 하나라도 깨웠는지 기록
-    if (t->priority > thread_current()->priority) need_preempt = true;
-  }
-  if (need_preempt) {
-    if (intr_context())
-      intr_yield_on_return();
-    else
-      thread_yield();
-  }
+// 1️⃣ 스레드 깨우기
+static void wake_sleepers(void){
+	int64_t now = timer_ticks();                                       // 지금 시각(현재 전체 틱 수)
+	while(!list_empty (&sleep_list)){                                  
+		struct thread *t = list_entry(list_front(&sleep_list), struct thread, elem);     // 맨 앞 깨울 스레드
+
+		if (t->wakeup_tick > now) break;                                                 // IF, 깨울 시각 전 -> 종료
+		list_pop_front (&sleep_list);                                                    // 깨울 시간 다 됨 -> 맨 앞 스레드 pop
+		thread_unblock (t);                                                              // 스레드 t를 BLOCKED → READY 상태로 바꿈(레디 큐에 넣음)
+	}
 }
+
+// // 1️⃣ 스레드 깨우기
+// static void wake_sleepers(void) {
+//   int64_t now = timer_ticks();  // 지금 시각(현재 전체 틱 수)
+//   bool need_preempt = false;
+
+//   while (!list_empty(&sleep_list)) {
+//     struct thread *t = list_entry(list_front(&sleep_list), struct thread,
+//                                   elem);  // 맨 앞 깨울 스레드
+//     if (t->wakeup_tick > now) break;      // IF, 깨울 시각 전 -> 종료
+//     list_pop_front(&sleep_list);  // 깨울 시간 다 됨 -> 맨 앞 스레드 pop
+//     thread_unblock(t);  // 스레드 t를 BLOCKED → READY 상태로 바꿈(레디 큐에 넣음)
+//     // 현재보다 높은 우선순위를 하나라도 깨웠는지 기록
+//     if (t->priority > thread_current()->priority) need_preempt = true;
+//   }
+//   if (need_preempt) {
+//     if (intr_context())
+//       intr_yield_on_return();
+//     else
+//       thread_yield();
+//   }
+// }
 
 /* Timer interrupt handler. */
 static void timer_interrupt(struct intr_frame *args UNUSED) {
