@@ -26,6 +26,12 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+/* src로부터 n 바이트를 사용자 스택에 푸시하고, 스택 오버플로우 시 false를 반환합니다. */
+static inline bool push_bytes(struct intr_frame *if_, const void *src, size_t n);
+/* push_bytes()를 이용해 포인터 등 8바이트 데이터를 사용자 스택에 푸시하는 래퍼 함수입니다. */
+static inline bool push_u64(struct intr_frame *if_, uint64_t val);
+/* 프로그램 실행에 필요한 초기 사용자 스택을 인자(argc, argv)를 이용해 구성합니다. */
+static bool build_user_stack(struct intr_frame *if_, char **argv, int argc);
 
 /* General process initializer for initd and other process. */
 static void
@@ -172,8 +178,9 @@ process_exec (void *f_name) {
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
-
-	/* We first kill the current context */
+	
+	/* We first kill the current context 
+	현재 프로세스의 유저 주소공간과 리소스 정리 */
 	process_cleanup ();
 
 	/* And then load the binary */
@@ -204,6 +211,10 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	// 임시로 무한루프 돌리기
+	while(1){
+		
+	}
 	return -1;
 }
 
@@ -316,6 +327,63 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes,
 		bool writable);
 
+
+/* src로부터 n 바이트를 사용자 스택에 푸시하고, 스택 오버플로우 시 false를 반환합니다. */
+static inline bool push_bytes(struct intr_frame *if_, const void *src, size_t n){
+	// 스택 한 페이지의 최저 유저주소
+	uint64_t low = (uint64_t)USER_STACK - PGSIZE;
+	if(n > (size_t)(if_->rsp - low))	return false;	// 한 페이지 넘김 방지
+	if_->rsp -= n;
+	memcpy((void*)if_->rsp, src, n);
+	return true;
+}
+
+/* push_bytes()를 이용해 포인터 등 8바이트 데이터를 사용자 스택에 푸시하는 래퍼 함수입니다. */
+static inline bool push_u64(struct intr_frame *if_, uint64_t val){
+	return push_bytes(if_, &val, sizeof(val));
+}
+
+/* 프로그램 실행에 필요한 초기 사용자 스택을 인자(argc, argv)를 이용해 구성합니다. */
+static bool build_user_stack(struct intr_frame *if_, char **argv, int argc){
+	uint64_t arg_addr[MAX_ARGS];
+	// 1. 문자열 역순 push -> arg_addr[]
+	for(int i = argc-1; i >= 0; i--){
+		size_t len = strlen(argv[i]) + 1; // '\0' 을 포함하니 +1
+		if(!push_bytes(if_, argv[i], len))	return false;
+		arg_addr[i] = if_->rsp;
+	}
+
+	// 2. pad 계산 및 push
+	uint64_t rsp_now = if_->rsp;
+	uint64_t ptr_bytes = 8*(argc + 2);
+	
+	uint64_t final_without_pad =  rsp_now - ptr_bytes;
+	uint64_t pad = final_without_pad & 0x7; // final_without_pad % 16
+	uint8_t zeros[8] = {0};
+	if(pad)	{
+		uint8_t zeros[8] = {0};
+		if(!push_bytes(if_, zeros, pad))
+			return false;
+	}
+
+	// 3. NULL, argv[i] 포인터들, argv, argc, fake ret
+	if(!push_u64(if_, 0))	return false;
+
+	for(int i = argc-1; i >= 0; i--){
+		if(!push_u64(if_, (uint64_t)arg_addr[i]))	return false;
+	}
+
+	// 현재 rsp가 argv 배열의 시작 주소
+	uint64_t argv_user = if_->rsp;
+	if_->R.rdi = (uint64_t)argc;
+	if_->R.rsi = argv_user;
+	if(!push_u64(if_, 0))	return false;	// return address
+	
+	ASSERT((if_->rsp & 0x7) == 0);
+
+	return true;
+}
+
 /* Loads an ELF executable from FILE_NAME into the current thread.
  * Stores the executable's entry point into *RIP
  * and its initial stack pointer into *RSP.
@@ -328,21 +396,48 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+	
+	// file_name 담을 버퍼 생성
+	char *cmd_tmp = palloc_get_page(PAL_ZERO);
+	if(cmd_tmp == NULL){
+		goto done;
+	}
+	strlcpy(cmd_tmp, file_name, PGSIZE);
 
-	/* Allocate and activate page directory. */
+	// 파싱해서 담을 문자열 버퍼 생성
+	char *argv[MAX_ARGS];
+	int argc = 0;
+	
+	char *saveptr = NULL;
+	char *token = strtok_r(cmd_tmp, "\t\r\n ", &saveptr);
+
+	while(token != NULL && argc < MAX_ARGS-1){
+		argv[argc++] = token;
+		token = strtok_r(NULL, "\t\r\n ", &saveptr);
+	}
+	
+	argv[argc] = NULL;
+	// argv[0] = file 경로
+	file_name = argv[0];
+
+	/* Allocate and activate page directory. 
+	주소공간 생성 & 활성화
+	새 페이지 테이블(PML4)를 만들고, 현재 스레드(프로세스)의 주소공간으로 스위치*/
 	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
 		goto done;
 	process_activate (thread_current ());
 
-	/* Open executable file. */
+	/* Open executable file. 
+	실행 파일 열기 */
 	file = filesys_open (file_name);
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
 
-	/* Read and verify executable header. */
+	/* Read and verify executable header. 
+	ELF 헤더 읽기 & 검증 */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
 			|| ehdr.e_type != 2
@@ -354,7 +449,8 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	}
 
-	/* Read program headers. */
+	/* Read program headers. 
+	프로그램 헤더 처리 */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
 		struct Phdr phdr;
@@ -407,21 +503,25 @@ load (const char *file_name, struct intr_frame *if_) {
 		}
 	}
 
-	/* Set up stack. */
+	/* Set up stack. 
+	유저 스택 만들기 */
 	if (!setup_stack (if_))
 		goto done;
 
-	/* Start address. */
+	/* Start address. 
+	진입점(시작 주소) 설정 */
 	if_->rip = ehdr.e_entry;
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+	 build_user_stack(if_, argv, argc);
 
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
 	file_close (file);
+	palloc_free_page(cmd_tmp);
 	return success;
 }
 
