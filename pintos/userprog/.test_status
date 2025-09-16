@@ -1,4 +1,6 @@
+args-dbl-space FAIL
 priority-donate-multiple PASS
+args-multiple FAIL
 priority-donate-one PASS
 priority-donate-lower PASS
 priority-preempt PASS
@@ -9,10 +11,13 @@ priority-donate-nest PASS
 alarm-single PASS
 priority-donate-multiple2 PASS
 alarm-priority PASS
+args-none FAIL
 priority-fifo PASS
 priority-sema PASS
 alarm-zero PASS
 priority-change PASS
 alarm-negative PASS
 priority-donate-sema PASS
+args-many FAIL
 alarm-multiple PASS
+args-single FAIL
