@@ -61,8 +61,7 @@ process_init (void) {
  * before process_create_initd() returns. Returns the initd's
  * thread id, or TID_ERROR if the thread cannot be created.
  * Notice that THIS SHOULD BE CALLED ONCE. */
-tid_t
-process_create_initd (const char *file_name) {
+tid_t process_create_initd (const char *file_name) {
 	char *fn_copy;
 	tid_t tid;
 
@@ -77,7 +76,7 @@ process_create_initd (const char *file_name) {
     sema_init(&initd_wait, 0);
     initd_wait_inited = true;
 	
-	/* 🔸 스레드 이름은 “첫 토큰”만 사용 */
+	/*  스레드 이름은 “첫 토큰”만 사용 */
     char tname[16];
     {
       const char *p = file_name;
@@ -244,8 +243,7 @@ int process_exec (void *f_name) {
  * does nothing. */
 
 // 🚧 initd 하나만 기다리는 최소 구현
-int
-process_wait (tid_t child_tid UNUSED) {
+int process_wait (tid_t child_tid UNUSED) {
 	 if (initd_wait_inited) {
         sema_down(&initd_wait);   /* initd가 exit하면 깨워짐 */
         return initd_status;      /* sys_exit(status)에서 넘긴 값 */
@@ -374,6 +372,7 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
  * and its initial stack pointer into *RSP.
  * Returns true if successful, false otherwise. */
 
+// 🅰️ load(): 커널 모드에서 “해당 프로세스의 유저 주소공간을 새로 만들고 채우는” 함수
 static bool load (const char *file_name, struct intr_frame *if_) {
 	struct thread *t = thread_current ();
 	struct ELF ehdr;
@@ -382,39 +381,35 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 	bool success = false;
 	int i;
 
-	/* Allocate and activate page directory. */
-	t->pml4 = pml4_create ();
-	if (t->pml4 == NULL) goto done;
+	/* 페이지 테이블 준비(주소 공간 만들기) */
+	t->pml4 = pml4_create ();                               // 맨 위 레벨(PML4) 테이블 하나를 새로 할당, 초기화 => 새 유저 주소공간(pml4) 생성
+	if (t->pml4 == NULL) goto done;                         // 예외 처리(메모리 부족)
 	
-	process_activate (thread_current ());
+	process_activate (thread_current ());                   // 지금부터 이 테이블 사용하라고 CPU에 통보 => 이후의 install_page()들이 이 주소공간에 매핑되도록 보장
 
-	// 1. 토큰화 블록(프로그램명/인자 분리)
+	// 🅰️ 1. 토큰화 블록(프로그램명/인자 분리)
 
 	// 0) 필요 함수 선언
-    char *argv_kern[MAX_ARGC];       // 토큰 포인터들을 임시로 담아 두는 배열
+    char *argv_kern[MAX_ARGC];       // 각 토큰의 시작 주소 포인터들 임시 저장 배열(커널 메모리에 존재)
     int argc = 0;                    // 인자 개수 카운터
 
-    char *prog_name = NULL;          // 첫 토큰
-    char *saveptr = NULL;            // 내부 상태 저장
+    char *prog_name = NULL;          // 첫 토큰(= 실행 파일 이름)
+    char *saveptr = NULL;            // strtok_r()의 상태 저장용 포인터
 
-	// 1) 준비(수정 가능 복사본 확보)
-	char * cmdline = palloc_get_page(0);
-	if(!cmdline) goto done;                     
+	// 1) 수정 가능 복사본 확보
+	char * cmdline = palloc_get_page(0);           // 커널 힙에서 한 페이지(4KB) 할당
+	if(!cmdline) goto done;                       // 예외처리(메모리 부족)
 
-	if(strnlen(file_name, PGSIZE) >= PGSIZE){
-		goto done;
-	}
+	if(strnlen(file_name, PGSIZE) >= PGSIZE) goto done;    // 예외처리(페이지 크기 이상)
 
-	strlcpy(cmdline, file_name, PGSIZE);
+	strlcpy(cmdline, file_name, PGSIZE);                   // 커널 페이지 cmdline으로 안전 복사(항상 NULL 종료 보장)
 
 	// 2-1) 첫 토큰: 프로그램명
 	prog_name = strtok_r(cmdline, " \t\r\n", &saveptr);
 
-	if(!prog_name){
-		goto done;
-	} 
+	if(!prog_name) goto done;                            // 예외처리
 
-	// 2-2) argv[0]에 프로그램명 삽입
+	// 2-2) argv[0]에 프로그램명 저장(문자열 시작 주소)
 	argv_kern[argc++] = prog_name;
 
 	// 3) 나머지 인자 수집
@@ -422,18 +417,19 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 		argv_kern[argc++] = tok;
 	}
 
-	file_name = prog_name;
+	// 4) file_name 재지정
+	file_name = prog_name;                // 첫 토큰(프로그램 이름)
 
 
 
-	/* Open executable file. */
+	/* 실행 파일 오픈*/
 	file = filesys_open (file_name);
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
 
-	/* Read and verify executable header. */
+	/* ELF 헤더 읽고 검증(정상 실행 파일인지 확인) */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
 			|| ehdr.e_type != 2
@@ -445,7 +441,7 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	}
 
-	/* Read program headers. */
+	/* ELF 프로그램 헤더(Program Header) 읽기 -> 메모리에 필요한 세그먼트만 올리기 */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
 		struct Phdr phdr;
@@ -498,20 +494,19 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 		}
 	}
 
-	/* Set up stack. */
-	if (!setup_stack (if_))
-		goto done;
+	/* 스택 페이지 생성 */
+	if (!setup_stack (if_)) goto done;
 
-	/* Start address. */
+	/* ELF 헤더에서 읽은 프로그램 진입 주소를 저장 */
 	if_->rip = ehdr.e_entry;
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 
-	// 2. 스택 포장 + 레지스터 세팅
+	// 🅰️ 2. 스택 포장 + 레지스터 세팅
 	// 1) 준비
 	uint8_t *rsp    = (uint8_t *) if_->rsp;                 // setup_stack이 준 USER_STACK의 꼭대기
-    uint8_t *bottom = (uint8_t *) USER_STACK - PGSIZE;      // Project 2는 스택 1페이지
+    uint8_t *bottom = (uint8_t *) USER_STACK - PGSIZE;      // 페이지의 바닥(낮은 주소)
 
     void *uaddr[MAX_ARGC];   // 유저 스택에 실제로 복사된 인자 문자열들의 시작 주소
 
@@ -528,8 +523,8 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 		uaddr[i] = (void *)rsp;
 	}
 
-	// 3) 16 바이트 정렬 보장
-	size_t mis = (size_t)((uintptr_t)rsp % 16);         // 16으로 나눈 나머지
+	// 3) 8 바이트 정렬 보장
+	size_t mis = (size_t)((uintptr_t)rsp % 8);         // 8으로 나눈 나머지(이유: 포인터가 바이트)
 	if (mis) {
 		if (WOULD_UNDERFLOW(mis)) goto done;
 		
@@ -555,14 +550,14 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 
 	// 6) argv, argc, fake return 0 차례로 푸시 
 	/*  argv 자체 포인터 푸시 (char** = 포인터 배열 시작 주소) */
-    if (WOULD_UNDERFLOW(sizeof(void*))) goto done;
-    rsp -= sizeof(void*);
-    *(void **)rsp = argv_user;   // 방금 만든 포인터 배열 블록의 시작 주소
+    // if (WOULD_UNDERFLOW(sizeof(void*))) goto done;
+    // rsp -= sizeof(void*);
+    // *(void **)rsp = argv_user;   // 방금 만든 포인터 배열 블록의 시작 주소
 
-    /*  argc 푸시 (정수 8바이트) */
-    if (WOULD_UNDERFLOW(sizeof(uint64_t))) goto done;
-    rsp -= sizeof(uint64_t);
-    *(uint64_t *)rsp = (uint64_t)argc;
+    // /*  argc 푸시 (정수 8바이트) */
+    // if (WOULD_UNDERFLOW(sizeof(uint64_t))) goto done;
+    // rsp -= sizeof(uint64_t);
+    // *(uint64_t *)rsp = (uint64_t)argc;
 
     /*  fake return address (0) 푸시 */
     if ((WOULD_UNDERFLOW(sizeof(uint64_t)))) goto done;
@@ -572,14 +567,9 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 	// 7) 최종 레지스터/스택포인터 세팅
 	if_->rsp = (uint64_t)rsp;
 	
-	// ✅ 인자 레지스터는 R 묶음 안에 있음
+	// 인자 레지스터는 R 묶음 안에 있음
     if_->R.rdi = (uint64_t)argc;
     if_->R.rsi = (uint64_t)argv_user;
-
-	
-	
-	// // 8) 임시 버퍼 정리
-	// palloc_free_page(cmdline);
 
 	#undef WOULD_UNDERFLOW
 
@@ -589,8 +579,8 @@ done:
 	/* We arrive here whether the load is successful or not. */
 	// file_close (file);
 	// return success;
-	if (file) file_close(file);             // 🔹 파일은 열렸을 때만 닫기
-    if (cmdline) palloc_free_page(cmdline); // 🔹 페이지는 할당됐을 때만 해제
+	if (file) file_close(file);             // 파일은 열렸을 때만 닫기
+    if (cmdline) palloc_free_page(cmdline); // 페이지는 할당됐을 때만 해제
     return success;
 }
 
