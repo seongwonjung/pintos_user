@@ -17,10 +17,33 @@
 #include "threads/thread.h"
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"           // 🚧 최소 구현
 #include "intrinsic.h"
+
+
 #ifdef VM
 #include "vm/vm.h"
 #endif
+
+#ifndef MAX_ARGC
+#define MAX_ARGC 64
+#endif
+
+ // 🚧 최소 구현
+static struct semaphore initd_wait;
+static bool initd_wait_inited = false;
+static int initd_status = -1;
+
+/* syscall의 sys_exit()에서 호출할 최소 setter */
+void process_set_exit (int status) {
+  initd_status = status;
+  if (initd_wait_inited)            /* 세마포어 준비된 뒤라면 깨우기 */
+    sema_up(&initd_wait);
+}
+ // 🚧
+
+
+
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
@@ -50,8 +73,28 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
+	// 🚧 initd 대기 라인 준비를 먼저 한다 (레이스 방지) */
+    sema_init(&initd_wait, 0);
+    initd_wait_inited = true;
+	
+	/* 🔸 스레드 이름은 “첫 토큰”만 사용 */
+    char tname[16];
+    {
+      const char *p = file_name;
+      while (*p == ' ' || *p == '\t') p++;               // leading space skip
+      size_t n = 0;
+      while (*p && *p!=' ' && *p!='\t' && *p!='\r' && *p!='\n') {
+         if (n + 1 < sizeof tname) tname[n++] = *p;       // 최대 15자 + NUL
+         p++;
+      }
+      tname[n] = '\0';
+      if (n == 0) strlcpy(tname, "initd", sizeof tname);
+    }
+    // 🚧
+
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	// tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (tname, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
@@ -122,6 +165,7 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
+
 	struct intr_frame *parent_if;
 	bool succ = true;
 
@@ -160,9 +204,8 @@ error:
 
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
-int
-process_exec (void *f_name) {
-	char *file_name = f_name;
+int process_exec (void *f_name) {
+	char *file_name = f_name;               
 	bool success;
 
 	/* We cannot use the intr_frame in the thread structure.
@@ -199,12 +242,22 @@ process_exec (void *f_name) {
  *
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
+
+// 🚧 initd 하나만 기다리는 최소 구현
 int
 process_wait (tid_t child_tid UNUSED) {
+	 if (initd_wait_inited) {
+        sema_down(&initd_wait);   /* initd가 exit하면 깨워짐 */
+        return initd_status;      /* sys_exit(status)에서 넘긴 값 */
+     }
+      return -1;
+
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	return -1;
+	// while(1);
+	
+	// return -1;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -320,8 +373,8 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
  * Stores the executable's entry point into *RIP
  * and its initial stack pointer into *RSP.
  * Returns true if successful, false otherwise. */
-static bool
-load (const char *file_name, struct intr_frame *if_) {
+
+static bool load (const char *file_name, struct intr_frame *if_) {
 	struct thread *t = thread_current ();
 	struct ELF ehdr;
 	struct file *file = NULL;
@@ -331,9 +384,47 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
-	if (t->pml4 == NULL)
-		goto done;
+	if (t->pml4 == NULL) goto done;
+	
 	process_activate (thread_current ());
+
+	// 1. 토큰화 블록(프로그램명/인자 분리)
+
+	// 0) 필요 함수 선언
+    char *argv_kern[MAX_ARGC];       // 토큰 포인터들을 임시로 담아 두는 배열
+    int argc = 0;                    // 인자 개수 카운터
+
+    char *prog_name = NULL;          // 첫 토큰
+    char *saveptr = NULL;            // 내부 상태 저장
+
+	// 1) 준비(수정 가능 복사본 확보)
+	char * cmdline = palloc_get_page(0);
+	if(!cmdline) goto done;                     
+
+	if(strnlen(file_name, PGSIZE) >= PGSIZE){
+		goto done;
+	}
+
+	strlcpy(cmdline, file_name, PGSIZE);
+
+	// 2-1) 첫 토큰: 프로그램명
+	prog_name = strtok_r(cmdline, " \t\r\n", &saveptr);
+
+	if(!prog_name){
+		goto done;
+	} 
+
+	// 2-2) argv[0]에 프로그램명 삽입
+	argv_kern[argc++] = prog_name;
+
+	// 3) 나머지 인자 수집
+	for(char *tok = strtok_r(NULL, " \t\r\n", &saveptr); tok != NULL && argc < MAX_ARGC; tok = strtok_r(NULL, " \t\r\n", &saveptr)){
+		argv_kern[argc++] = tok;
+	}
+
+	file_name = prog_name;
+
+
 
 	/* Open executable file. */
 	file = filesys_open (file_name);
@@ -417,12 +508,90 @@ load (const char *file_name, struct intr_frame *if_) {
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 
+	// 2. 스택 포장 + 레지스터 세팅
+	// 1) 준비
+	uint8_t *rsp    = (uint8_t *) if_->rsp;                 // setup_stack이 준 USER_STACK의 꼭대기
+    uint8_t *bottom = (uint8_t *) USER_STACK - PGSIZE;      // Project 2는 스택 1페이지
+
+    void *uaddr[MAX_ARGC];   // 유저 스택에 실제로 복사된 인자 문자열들의 시작 주소
+
+	#define WOULD_UNDERFLOW(nbytes) ((rsp) < ((bottom) + (nbytes)))
+
+	// 2) 문자열 “실물”을 마지막 인자부터 복사 + 복사된 유저 주소 기록 
+	for(i = argc-1; i >= 0; --i){
+		size_t len = strlen(argv_kern[i]) +1 ;
+
+		if(WOULD_UNDERFLOW(len))  goto done;
+		
+		rsp -= len;
+		memcpy(rsp, argv_kern[i], len);
+		uaddr[i] = (void *)rsp;
+	}
+
+	// 3) 16 바이트 정렬 보장
+	size_t mis = (size_t)((uintptr_t)rsp % 16);         // 16으로 나눈 나머지
+	if (mis) {
+		if (WOULD_UNDERFLOW(mis)) goto done;
+		
+        rsp -= mis;                                    // rsp 주소 부족한만큼 내리기
+		memset(rsp, 0, mis);                           // 패딩
+    }
+
+	// 4) NULL sentinel 삽입
+	if (WOULD_UNDERFLOW(sizeof(char*))) goto done;
+
+    rsp -= sizeof(char *);                          // 8바이트 내림
+    *(char **)rsp = NULL;                           // 해당 자리에 0(널 포인터) 삽입
+
+    /// 5) argv[i] 포인터들(역순으로 푸시: 마지막 → 첫 번째)
+	for (int i = argc - 1; i >= 0; i--) {
+		if (WOULD_UNDERFLOW(sizeof(char*)))  goto done;
+		
+		rsp -= sizeof(char *);      // 자리 확보
+        *(void **)rsp = uaddr[i];   // 방금 복사된 “유저” 문자열 주소
+    }
+		 
+    void *argv_user = (void *)rsp;   // 이 시점의 rsp가 곧 argv(char**)의 시작 주소
+
+	// 6) argv, argc, fake return 0 차례로 푸시 
+	/*  argv 자체 포인터 푸시 (char** = 포인터 배열 시작 주소) */
+    if (WOULD_UNDERFLOW(sizeof(void*))) goto done;
+    rsp -= sizeof(void*);
+    *(void **)rsp = argv_user;   // 방금 만든 포인터 배열 블록의 시작 주소
+
+    /*  argc 푸시 (정수 8바이트) */
+    if (WOULD_UNDERFLOW(sizeof(uint64_t))) goto done;
+    rsp -= sizeof(uint64_t);
+    *(uint64_t *)rsp = (uint64_t)argc;
+
+    /*  fake return address (0) 푸시 */
+    if ((WOULD_UNDERFLOW(sizeof(uint64_t)))) goto done;
+    rsp -= sizeof(uint64_t);
+    *(uint64_t *)rsp = 0;  
+	
+	// 7) 최종 레지스터/스택포인터 세팅
+	if_->rsp = (uint64_t)rsp;
+	
+	// ✅ 인자 레지스터는 R 묶음 안에 있음
+    if_->R.rdi = (uint64_t)argc;
+    if_->R.rsi = (uint64_t)argv_user;
+
+	
+	
+	// // 8) 임시 버퍼 정리
+	// palloc_free_page(cmdline);
+
+	#undef WOULD_UNDERFLOW
+
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
-	return success;
+	// file_close (file);
+	// return success;
+	if (file) file_close(file);             // 🔹 파일은 열렸을 때만 닫기
+    if (cmdline) palloc_free_page(cmdline); // 🔹 페이지는 할당됐을 때만 해제
+    return success;
 }
 
 
