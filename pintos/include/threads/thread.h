@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "threads/interrupt.h"
-
+#include "threads/synch.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -22,7 +22,7 @@ enum thread_status {
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
-#define TID_ERROR ((tid_t)-1) /* Error value for tid_t. */
+#define TID_ERROR ((tid_t) - 1) /* Error value for tid_t. */
 
 /* Thread priorities. */
 #define PRI_MIN 0      /* Lowest priority. */
@@ -97,16 +97,21 @@ struct thread {
   int64_t wakeup_tick;       // 1️⃣ 깨울 시각
 
   // 3️⃣ donate-multiple
-  struct lock *waiting_lock;  // 지금 기다리는 락 (중첩 기부 전파용)
-  struct list donations;      // 나에게 기부한 스레드들
+  struct lock *waiting_lock;       // 지금 기다리는 락 (중첩 기부 전파용)
+  struct list donations;           // 나에게 기부한 스레드들
   struct list_elem donation_elem;  // 내가 남 donations에 들어갈 때 쓰는 elem
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
-
+  struct list_elem allelem;
 #ifdef USERPROG
   /* Owned by userprog/process.c. */
-  uint64_t *pml4; /* Page map level 4 */
+  uint64_t *pml4;              /* Page map level 4 */
+  int exit_status;             // 자식 프로세스 종료크드
+  struct semaphore wait_sema;  // 동기화를 위한 세마포어
+  struct list child_list;
+  struct list_elem child_elem;
+  bool is_waited;  // 부모가 이미 wait했는지(중복 방지용)
 #endif
 #ifdef VM
   /* Table for whole virtual memory owned by thread. */
@@ -156,6 +161,7 @@ void thread_refresh_priority(struct thread *t);
 void thread_remove_donations_with_lock(
     struct lock *lock);                          // 락 해제 시 기부 회수
 void thread_donate_chain(struct thread *donor);  // [NEST] 최대 8단계 전파
-void thread_yield_if_lower(void);  // 최고 우선순위가 아니면 양보
+void thread_yield_if_lower(void);                // 최고 우선순위가 아니면 양보
 struct list *get_ready_list(void);
+struct thread *get_thread(tid_t tid);
 #endif /* threads/thread.h */

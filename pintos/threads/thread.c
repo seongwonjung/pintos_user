@@ -30,10 +30,8 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 struct list ready_list;
-
-struct list *get_ready_list(void) {
-  return &ready_list;
-}
+struct list all_list;
+struct list *get_ready_list(void) { return &ready_list; }
 
 /* Idle thread. */
 static struct thread *idle_thread;
@@ -89,7 +87,7 @@ static void ready_reinsert_if_needed(struct thread *t) {
 
 /* donations 리스트에서 최댓값을 찾아 base와 비교해 유효 우선순위를 갱신 */
 void thread_refresh_priority(struct thread *t) {
-  int newp = t->base_priority;  // 원래 값에서 시작
+  int newp = t->base_priority;                           // 원래 값에서 시작
   for (struct list_elem *e = list_begin(&t->donations);  // 모든 기부자를 훑어
        e != list_end(&t->donations); e = list_next(e)) {
     struct thread *donor = list_entry(e, struct thread, donation_elem);
@@ -130,7 +128,7 @@ void thread_remove_donations_with_lock(struct lock *lock) {
     if (donor->waiting_lock == lock)
       list_remove(e);  // donor가 "이 lock을 기다리며" 나에게 기부하고 있던
                        // 항목이면 제거
-    e = next;  // 다음 노드로
+    e = next;          // 다음 노드로
   }
 }
 
@@ -189,6 +187,7 @@ void thread_init(void) {
   lock_init(&tid_lock);
   list_init(&ready_list);
   list_init(&destruction_req);
+  list_init(&all_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread();
@@ -278,7 +277,9 @@ tid_t thread_create(const char *name, int priority, thread_func *function,
   t->tf.ss = SEL_KDSEG;
   t->tf.cs = SEL_KCSEG;
   t->tf.eflags = FLAG_IF;
-
+  enum intr_level old_level = intr_disable();
+  list_push_back(&all_list, &t->allelem);
+  intr_set_level(old_level);
   /* Add to run queue. */
   thread_unblock(t);
   if (t->priority > thread_current()->priority)
@@ -370,7 +371,10 @@ void thread_exit(void) {
 #ifdef USERPROG
   process_exit();
 #endif
-
+  /* 현재 스레드를 all_list에서 제거 */
+  intr_disable();  // 리스트 조작 중 인터럽트 방지
+  list_remove(&thread_current()->allelem);
+  intr_enable();
   /* Just set our status to dying and schedule another process.
      We will be destroyed during the call to schedule_tail(). */
   intr_disable();
@@ -404,7 +408,7 @@ void thread_set_priority(int new_priority) {
   struct thread *cur = thread_current();
 
   cur->base_priority = new_priority;  // 원래 값만 갱신
-  thread_refresh_priority(cur);  // donors 고려 "유효 우선순위" 재계산
+  thread_refresh_priority(cur);       // donors 고려 "유효 우선순위" 재계산
   intr_set_level(old);
 
   thread_yield_if_lower();  // 최고가 아니면 양보
@@ -513,13 +517,19 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   strlcpy(t->name, name, sizeof t->name);
   t->tf.rsp = (uint64_t)t + PGSIZE - sizeof(void *);
 
-  t->priority = priority;  // 유효 우선순위
-  t->base_priority =
-      priority;  // 3️⃣ 원래 우선순위 저장(One)  => 복원 기준
-  list_init(&t->donations);  // 3️⃣ 기부자 목록 초기화(muti)
-  t->waiting_lock = NULL;    // 3️⃣ 현재 기다리는 락X(muti)
+  t->priority = priority;       // 유효 우선순위
+  t->base_priority = priority;  // 3️⃣ 원래 우선순위 저장(One)  => 복원 기준
+  list_init(&t->donations);     // 3️⃣ 기부자 목록 초기화(muti)
+  t->waiting_lock = NULL;       // 3️⃣ 현재 기다리는 락X(muti)
 
   t->magic = THREAD_MAGIC;
+
+#ifdef USERPROG
+  t->exit_status = -1;
+  sema_init(&t->wait_sema, 0);
+  list_init(&t->child_list);
+  t->is_waited = false;
+#endif
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -695,4 +705,30 @@ static tid_t allocate_tid(void) {
   lock_release(&tid_lock);
 
   return tid;
+}
+
+/* * tid에 해당하는 스레드 포인터를 all_list에서 찾아 반환합니다.
+ * 찾지 못하면 NULL을 반환합니다.
+ */
+struct thread *get_thread(tid_t tid) {
+  struct thread *t = NULL;
+  struct list_elem *e;
+
+  // 인터럽트를 비활성화하여 리스트 순회 중 race condition 방지
+  enum intr_level old_level = intr_disable();
+
+  for (e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)) {
+    t = list_entry(e, struct thread, allelem);
+    if (t->tid == tid) {
+      // 찾았으므로 루프 종료
+      break;
+    }
+    // 못 찾았으면 t를 NULL로 초기화
+    t = NULL;
+  }
+
+  // 원래 인터럽트 상태로 복구
+  intr_set_level(old_level);
+
+  return t;
 }
