@@ -20,6 +20,9 @@
 #include <string.h>                   // memcpy, strlen, strnlen 등
 #include "threads/synch.h"            // struct lock, lock_init(), lock_acquire(), lock_release()
 
+// ⓞ
+#include "filesys/file.h"     // file_close(), struct file
+
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -81,6 +84,22 @@ static char* copy_in_string_or_exit (const char *uaddr) {
 }
 
 
+// ⓞ OPEN 헬퍼: 비어있는 FD 슬롯에 file* 등록하고 FD 번호 반환(없으면 -1)
+static int fd_install(struct thread *t, struct file *f){
+
+  for(int fd = FD_MIN; fd < FD_MAX; fd++){            
+    if(t->fd_table[fd] == NULL){          // NULL이면 아직 아무 파일도 안 꽂혀 있음 → 사용 가능한 슬롯
+      t->fd_table[fd] = f;
+      // t->fd_next = fd + 1;
+    if(t->fd_next >= FD_MAX) t->fd_next = FD_MIN;      // 예외 처리(랩어라운드)  
+    
+    return fd;         // 성공 -> fd번호 반환
+    } 
+  }
+  return -1;            // 실패
+}
+
+
 void syscall_init (void) {
 	write_msr(MSR_STAR, ((uint64_t)SEL_UCSEG - 0x10) << 48  |
 			((uint64_t)SEL_KCSEG) << 32);
@@ -97,7 +116,7 @@ void syscall_init (void) {
 }
 
 
-// 🚧
+// 🚧 sys_exit
 // “프로세스가 나 끝낼게요!”라고 말할 때 해야 할 일
 static void sys_exit (int status) {
   struct thread *cur = thread_current();
@@ -134,6 +153,37 @@ static int sys_create (const char *ufile, unsigned initial_size) {
   return ok;                         // 0(실패), 1(성공) 값을 반환
 }
 
+// ⓞ OPEN
+static int sys_open(const char *ufile){
+  // 1) 준비
+  char *kname = copy_in_string_or_exit(ufile);  // 유저 포인터 검증 & 커널 버퍼로 복사
+  int ret = -1;             // 기본값: 실패(-1)
+
+  // 2) 파일 열기
+  if (kname[0] != '\0') {                        // 빈 문자열: false
+    lock_acquire(&filesys_lock);
+    struct file *f = filesys_open(kname);         // "파일 열기"(성공 시 file*)
+    lock_release(&filesys_lock);
+    
+    // 3) FD테이블에 등록(IF, 파일 실제 존재)
+    if (f){
+      struct thread *cur = thread_current();
+      int newfd = fd_install(cur, f);         // FD테이블 장착
+      
+      if(newfd > 0){
+        ret = newfd;                     // 성공
+      } else{                            // 실패(FD 공간 부족)→ 열린 파일 닫고 실패
+        lock_acquire(&filesys_lock);
+        file_close(f);         
+        lock_release(&filesys_lock);
+      }
+    }
+  } 
+
+  // 4) 정리
+  palloc_free_page(kname);            // 커널 버퍼(4KB) 해제
+  return ret;                         // newfd(성공), -1(실패) 값을 반환
+}
 
 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
@@ -148,11 +198,17 @@ void syscall_handler (struct intr_frame *f) {
       f->R.rax = (uint64_t)sys_write((int)f->R.rdi, (const void *)f->R.rsi, (unsigned)f->R.rdx);
       break;
 
-    // ⓒ
+    
     case SYS_CREATE: {
       const char *ufile = (const char *)f->R.rdi;      // RDI → 첫 번째 인자(filename 포인터)
       unsigned size = (unsigned)f->R.rsi;              // RSI → 두 번째 인자(size)
       f->R.rax = (uint64_t)sys_create(ufile, size);
+      break;
+    }
+
+    case SYS_OPEN: {
+      const char *ufile = (const char *)f->R.rdi;      // RDI → 첫 번째 인자(filename 포인터)
+      f->R.rax = (uint64_t)sys_open(ufile);
       break;
     }
 

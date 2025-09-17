@@ -524,15 +524,22 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   list_init(&t->donations);  // 3️⃣ 기부자 목록 초기화(muti)
   t->waiting_lock = NULL;    // 3️⃣ 현재 기다리는 락X(muti)
 
-  // 🚧 템플릿 기본값 세팅
+  
 #ifdef USERPROG
+  // 🚧 템플릿 기본값 세팅
   t->parent = NULL;
   list_init(&t->children);
   t->as_child = NULL;
   t->exit_status = -1;
   t->running_file = NULL;
+
+  // ⓞ FD 테이블 초기화
+  for(int i=0; i < FD_MAX; i++){
+    t ->fd_table[i] = NULL;          // NULL로 시작
+    t->fd_next = FD_MIN;             // 첫 FD는 2부터
+  }
+
 #endif
-  // 🚧 
 
   t->magic = THREAD_MAGIC;
 }

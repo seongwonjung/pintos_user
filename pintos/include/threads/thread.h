@@ -38,6 +38,10 @@ typedef int tid_t;
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
 
+// ⓞ FD 범위(표준: 0=stdin, 1=stdout는 예약, 실제 파일은 2부터)
+#define FD_MIN 2            // 0,1은 표준입출력 예약
+#define FD_MAX 128
+
 /* A kernel thread or user process.
  *
  * Each thread structure is stored in its own 4 kB page.  The
@@ -120,9 +124,12 @@ struct thread {
   struct child *as_child;    // 부모가 만들어준 내 child 노드 가리킴
   int exit_status;           // 종료 코드
 
-  /* 실행 파일(rox-*) */
+  // 🚧 실행 파일(rox-*) 
   struct file *running_file; // 실행 중인 ELF 파일 핸들(실행 중 write 금지/해제 위해 보관)
-  // 🚧 
+
+  // ⓞ 스레드(=프로세스)별 FD 테이블
+  struct file *fd_table[FD_MAX];   // FD번호 → 파일객체 매핑
+  int fd_next;                     // 다음 탐색 시작 위치   
 
   /* 주소 공간 */
   uint64_t *pml4; /* Page map level 4 */

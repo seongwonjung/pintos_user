@@ -24,7 +24,9 @@
         "stddef.h": "c",
         "stdio.h": "c",
         "interrupt.h": "c",
-        "malloc.h": "c"
+        "malloc.h": "c",
+        "palloc.h": "c",
+        "file.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
