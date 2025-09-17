@@ -22,6 +22,7 @@ static void sys_write(struct intr_frame *f);
 static void sys_exit(struct intr_frame *f);
 static void sys_exit_with_error(struct intr_frame *f);
 static void sys_create(struct intr_frame *f);
+static void sys_halt(struct intr_frame *f);
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -176,6 +177,8 @@ static void sys_exit(struct intr_frame *f) {
   thread_current()->exit_status = status;
   thread_exit();
 }
+
+static void sys_halt(struct intr_frame *f) { power_off(); }
 
 static void sys_write(struct intr_frame *f) {
   int fd = (int)f->R.rdi;
