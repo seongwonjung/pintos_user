@@ -30,14 +30,14 @@
 #define LOADER_ARGS_LEN 128
 #define LOADER_ARG_CNT_LEN 4
 
-/* GDT selectors defined by loader.
-   More selectors are defined by userprog/gdt.h. */
-#define SEL_NULL        0x00    /* Null selector. */
-#define SEL_KCSEG       0x08    /* Kernel code selector. */
-#define SEL_KDSEG       0x10    /* Kernel data selector. */
-#define SEL_UDSEG       0x1B    /* User data selector. */
-#define SEL_UCSEG       0x23    /* User code selector. */
-#define SEL_TSS         0x28    /* Task-state segment. */
-#define SEL_CNT         8       /* Number of segments. */
+/* 로더(loader)에 의해 정의된 GDT 셀렉터들.  
+   더 많은 셀렉터들은 userprog/gdt.h에서 정의된다. */
+#define SEL_NULL        0x00    /* Null selector.              → 널(null) 셀렉터 */
+#define SEL_KCSEG       0x08    /* Kernel code selector.        → 커널 코드 셀렉터 */
+#define SEL_KDSEG       0x10    /* Kernel data selector.        → 커널 데이터 셀렉터 */
+#define SEL_UDSEG       0x1B    /* User data selector.          → 사용자 데이터 셀렉터 */
+#define SEL_UCSEG       0x23    /* User code selector.          → 사용자 코드 셀렉터 */
+#define SEL_TSS         0x28    /* Task-state segment.          → 태스크 상태 세그먼트 */
+#define SEL_CNT         8       /* Number of segments.          → 세그먼트 개수 */
 
 #endif /* threads/loader.h */

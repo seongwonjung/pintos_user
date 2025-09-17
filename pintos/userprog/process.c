@@ -27,6 +27,7 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+static char* my_strdup(const char* s);
 #define MAX_ARGS 64
 
 /* General process initializer for initd and other process. */
@@ -346,13 +347,35 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+	/* ------------------------ 입력받은 명령어 파싱 섹션 ---------------------------*/
+	/* 원본이 손상가지 않도록 원본복사 */
+	/* my_strdup(const char* s) => malloc + strcpy s를 복사하여 메모리를 할당받고 저장*/
 	char* token ;
 	char* copy ;
 	char* save = NULL;
 	char* argv[MAX_ARGS];
 	int argc = 0;
-	uint64_t argv_addr[128]; // argv 포인터들을 저장할 배열
+	uint64_t argv_addr[MAX_ARGS]; // argv 포인터들을 저장할 배열
 	uint64_t *stack_ptr = (uint64_t *)if_->rsp; //스택포인터
+	copy = my_strdup(file_name);
+	
+	if (copy == NULL) {
+		goto done;
+	};
+
+	/* 공백을 기준으로 토큰 분리 */
+	token = strtok_r(copy, "\t\r\n ", &save);
+	while (token != NULL && argc < MAX_ARGS - 1) {
+		argv[argc++] = token;
+		token = strtok_r(NULL, "\t\r\n ", &save);
+	}
+
+	//센티넬
+	argv[argc] = NULL;
+
+	/* 할당받은 문자열 메모리 공간 반환 */
+	file_name = argv[0];
+	/* ------------------------------------------------------------------------*/
 
 	/* 페이지 테이블 생성 및 활성호ㅏ */	
 	t->pml4 = pml4_create ();
@@ -378,29 +401,7 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: error loading executable\n", file_name);
 		goto done;
 	}
-	/* ------------------------ 입력받은 명령어 파싱 섹션 ---------------------------*/
-	/* 원본이 손상가지 않도록 원본복사 */
-	/* strdup(const char* s) => malloc + strcpy s를 복사하여 메모리를 할당받고 저장*/
-	copy = strdup(file_name);
 	
-	if (copy == NULL) {
-		goto done;
-	};
-
-	/* 공백을 기준으로 토큰 분리 */
-	token = strtok(copy, "\t\r\n ", NULL);
-	while (token != NULL && argc < MAX_ARGS - 1) {
-		argv[argc ++] = strdup(token);
-		token = strtok(NULL, "\t\r\n ", NULL);
-	}
-
-	//센티넬
-	argv[argc] = NULL;
-
-	/* 할당받은 문자열 메모리 공간 반환 */
-	free(copy);
-	/* ------------------------------------------------------------------------*/
-
 	/* Read program headers. 프로그램 헤더 읽기 */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
@@ -470,6 +471,7 @@ load (const char *file_name, struct intr_frame *if_) {
 		memcpy(stack_ptr, argv[i], len);
 		argv_addr[i] = (char *)stack_ptr;  // 나중에 포인터 배열 만들 때 필요
 	}
+
 	/* 2. 정렬 -> 8바이트 배수 */
 	stack_ptr = (uint64_t *)((uintptr_t)stack_ptr & ~0x7);
 
@@ -481,16 +483,19 @@ load (const char *file_name, struct intr_frame *if_) {
 		*stack_ptr = (uint64_t)argv_addr[i];
 	}
 
-	/* 4. argc push */
+	/* 4. argc 적재 */
 	stack_ptr--;
 	*stack_ptr = argc;
 
+	if_->R.rsi = if_->rsp;
 	/* 5. dummy return address push */
 	stack_ptr--;
 	*stack_ptr = 0;
 
 	/* 최종 rsp 업데이트 */
-	if_->rsp = (uint64_t *)stack_ptr;
+	if_->rsp = (uint64_t)stack_ptr;
+	if_->R.rdi = (uint64_t)argc;
+	
 	/* -------------------------------------------------------------------------------- */
 	hex_dump(stack_ptr, USER_STACK, USER_STACK - (uintptr_t)stack_ptr, true);
 	success = true;
@@ -498,9 +503,19 @@ load (const char *file_name, struct intr_frame *if_) {
 done:
 	/* We arrive here whether the load is successful or not. */
 	file_close (file);
+	free(copy);
 	return success;
 }
 
+/* --------------------------------palloc + mcmcpy구현---------------------------------- */
+static char* my_strdup(const char* s) {
+    size_t len = strlen(s) + 1;
+    char* copy = palloc_get_page(0);  // Pintos 커널에서는 malloc 대신 palloc
+    if (!copy) return NULL;
+    strlcpy(copy, s, len);
+    return copy;
+}
+/* ------------------------------------------------------------------------------------ */
 
 /* Checks whether PHDR describes a valid, loadable segment in
  * FILE and returns true if so, false otherwise. */

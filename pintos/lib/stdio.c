@@ -544,11 +544,12 @@ __printf (const char *format,
 	va_end (args);
 }
 
-/* Dumps the SIZE bytes in BUF to the console as hex bytes
-   arranged 16 per line.  Numeric offsets are also included,
-   starting at OFS for the first byte in BUF.  If ASCII is true
-   then the corresponding ASCII characters are also rendered
-   alongside. */
+/* 
+BUF에 있는 SIZE 바이트를 콘솔에 16바이트씩 한 줄로 **16진수**로 출력합니다.
+숫자 오프셋도 포함되며, 첫 번째 바이트는 OFS에서 시작합니다.
+만약 ASCII가 true라면, 해당 바이트에 대응되는 **ASCII 문자**도 옆에 함께 표시됩니다.
+*/
+
 void
 hex_dump (uintptr_t ofs, const void *buf_, size_t size, bool ascii) {
 	const uint8_t *buf = buf_;
