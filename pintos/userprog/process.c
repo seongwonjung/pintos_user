@@ -16,8 +16,8 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/mmu.h"
-#include "threads/vaddr.h"
-#include "threads/synch.h"           // 🚧 최소 구현
+#include "threads/vaddr.h"        
+#include "threads/malloc.h"    // 🚧 malloc (작은 구조체: struct child, struct start_info)
 #include "intrinsic.h"
 
 
@@ -29,20 +29,14 @@
 #define MAX_ARGC 64
 #endif
 
- // 🚧 최소 구현
-static struct semaphore initd_wait;
-static bool initd_wait_inited = false;
-static int initd_status = -1;
 
-/* syscall의 sys_exit()에서 호출할 최소 setter */
-void process_set_exit (int status) {
-  initd_status = status;
-  if (initd_wait_inited)            /* 세마포어 준비된 뒤라면 깨우기 */
-    sema_up(&initd_wait);
-}
  // 🚧
-
-
+/* initd 시작용 패키지 */
+struct start_info {
+  char *file_name;        // 자식에게 넘길 명령줄 복사본
+  struct child *c;        // 부모가 만든 child 노드 포인터(핸드셰이크용)
+};
+// 🚧
 
 
 static void process_cleanup (void);
@@ -61,57 +55,114 @@ process_init (void) {
  * before process_create_initd() returns. Returns the initd's
  * thread id, or TID_ERROR if the thread cannot be created.
  * Notice that THIS SHOULD BE CALLED ONCE. */
-tid_t process_create_initd (const char *file_name) {
-	char *fn_copy;
-	tid_t tid;
+tid_t process_create_initd (const char *file_name) {    // file_name: 부모가 넘겨준 커맨드라인 전체(예: "echo hello").
+	char *fn_copy;                         // 커맨드라인을 커널 페이지에 안전하게 복사해둘 버퍼 포인터
+	tid_t tid;                             // 새로 만들 자식 스레드 저장용
 
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
-	fn_copy = palloc_get_page (0);
+	fn_copy = palloc_get_page (0);                     // 4KB 페이지 하나 할당
 	if (fn_copy == NULL)
 		return TID_ERROR;
-	strlcpy (fn_copy, file_name, PGSIZE);
+	strlcpy (fn_copy, file_name, PGSIZE);             // 최대 PGSIZE까지 복사(→ 오버런 방지)
 
-	// 🚧 initd 대기 라인 준비를 먼저 한다 (레이스 방지) */
-    sema_init(&initd_wait, 0);
-    initd_wait_inited = true;
+	// 🚧
 	
 	/*  스레드 이름은 “첫 토큰”만 사용 */
-    char tname[16];
+    char tname[16];                   // 버퍼(최대 15자 + NULL)
     {
       const char *p = file_name;
-      while (*p == ' ' || *p == '\t') p++;               // leading space skip
+      while (*p == ' ' || *p == '\t') p++;               // 공백/탭 건너뛰고 첫 글자에 맞춰 둠
       size_t n = 0;
       while (*p && *p!=' ' && *p!='\t' && *p!='\r' && *p!='\n') {
-         if (n + 1 < sizeof tname) tname[n++] = *p;       // 최대 15자 + NUL
+         if (n + 1 < sizeof tname) tname[n++] = *p;       // 첫 토큰(공백/개행 전까지)을 tname에 복사
          p++;
       }
+
       tname[n] = '\0';
-      if (n == 0) strlcpy(tname, "initd", sizeof tname);
+      if (n == 0) strlcpy(tname, "initd", sizeof tname);   // 토큰이 하나도 없으면(빈 문자열이면) 예비 이름 "initd" 사용
     }
+
+	 /* ⬇️ 자식 상태 노드 1개 생성 + 부모 리스트에 연결 */
+     struct child *c = malloc(sizeof *c);                      // 부모가 자식을 식별/대기하기 위한 상태 노드(struct child)를 힙에 생성
+     if (!c) { palloc_free_page(fn_copy); return TID_ERROR; }  //예외처리
+     
+	 c->tid = TID_ERROR; c->exit_status = -1;                    // 초기값: 아직 스레드 생성 전이니 tid는 임시 TID_ERROR, 종료코드도 미정(-1)
+     
+	 sema_init(&c->load_sema, 0); c->load_success = false;       // 결과 플래그/종료 플래그는 기본값 false
+     sema_init(&c->wait_sema, 0); c->exited = false;  
+     
+	 list_push_back(&thread_current()->children, &c->elem);      // 현재 스레드(=부모)의 children 리스트에 이 노드를 연결 -> 나중에 정확한 매칭 위해
+
+   
+	 /* ⬇️ initd에 넘길 aux 패키지 */
+    struct start_info *si = malloc(sizeof *si);           // 자식에게 전달해야 할 2가지(커맨드라인 페이지, child 노드)를 구조체로 포장
+    if (!si) { list_remove(&c->elem); free(c); palloc_free_page(fn_copy); return TID_ERROR; }    // 예외 처리
+    si->file_name = fn_copy;       // 커맨드라인 페이지
+    si->c = c;                     // child 노드 저장
+
+	tid = thread_create (tname, PRI_DEFAULT, initd, si);            //새 커널 스레드 생성(시작 함수는 initd, aux로 si 포인터 전달)
+    
+	if (tid == TID_ERROR) {
+       free(si); list_remove(&c->elem); free(c); palloc_free_page(fn_copy);
+       return TID_ERROR;
+    }
+
+    c->tid = tid;                // 진짜 자식의 tid를 child 노드에 기록
+
+    
+	/* ⬇️ 로드 결과만 1회 대기(전역 세마 대체) */
+    sema_down(&c->load_sema);                    // 부모는 여기서 딱 한 번 기다림. (초기값 0이니 자식이 sema_up할 때까지 슬립)
+    if (!c->load_success) return TID_ERROR;      // 실패
+
     // 🚧
 
 	/* Create a new thread to execute FILE_NAME. */
 	// tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
-	tid = thread_create (tname, PRI_DEFAULT, initd, fn_copy);
-	if (tid == TID_ERROR)
-		palloc_free_page (fn_copy);
-	return tid;
+	// tid = thread_create (tname, PRI_DEFAULT, initd, fn_copy);
+	// if (tid == TID_ERROR)
+	// 	palloc_free_page (fn_copy);
+	return tid;                              // 성공 -> 자식의 tid를 반환
 }
 
 /* A thread function that launches first user process. */
-static void
-initd (void *f_name) {
+static void initd (void *f_name) {
 #ifdef VM
-	supplemental_page_table_init (&thread_current ()->spt);
-#endif
+	supplemental_page_table_init (&thread_current ()->spt);      //새 스레드의 SPT 준비
+#endif   
 
-	process_init ();
+	process_init ();       // 공통 프로세스 초기화
 
-	if (process_exec (f_name) < 0)
-		PANIC("Fail to launch initd\n");
-	NOT_REACHED ();
+
+	// 🚧
+	// aux(=f_name) 포장 풀기
+	struct start_info *si = f_name;
+    struct thread *cur = thread_current();
+
+    /* aux 내용 보관하고 si는 해제해도 됨 */
+    struct child *c = si->c;                  // child 노드
+    char *fname = si->file_name;              // file_name(palloc된 한 페이지)
+    free(si);                                 //포장 자체는 더 쓸 일 X -> 즉시 free
+
+    cur->as_child = c;                        // 부모와 통신할 핸드셰이크 창구로 child 노드를 연결
+
+    if (process_exec (fname) < 0) {                   // 진짜 유저 프로그램으로 갈아타기(process_exec() 호출) -> 실패(<0)면
+   
+      cur->exit_status = -1;                            // 종료코드 -1 설정
+      thread_exit();                                    // 종료
+    }
+    
+	NOT_REACHED ();                                    // 성공 -> do_iret()로 유저모드로 넘어감(돌아오지X)
+
+	// 	if (process_exec (f_name) < 0)
+    // 		PANIC("Fail to launch initd\n");
+    // 	NOT_REACHED ();
 }
+
+
+
+
+
 
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
@@ -204,31 +255,40 @@ error:
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
 int process_exec (void *f_name) {
-	char *file_name = f_name;               
+	char *file_name = f_name;               // initd()가 넘겨준 fname(=palloc 페이지)       
 	bool success;
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
 	 * it stores the execution information to the member. */
-	struct intr_frame _if;
+	// 유저모드로 점프할 레지스터 세트를 담을 _if 준비
+	struct intr_frame _if;               
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
-	/* We first kill the current context */
-	process_cleanup ();
+	process_cleanup ();                       // 기존 커널/스레드 문맥을 깨끗이 비우고 새 유저 주소공간을 올릴 준비
 
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	success = load (file_name, &_if);        // 성공 -> 실행 파일을 읽어 유저 주소공간에 매핑 + 스택 세팅 + rip/rsp까지 _if에 채움
 
-	/* If load failed, quit. */
+
+	/* 🚧 부모에게 로드 결과 통지(핸드셰이크) */
+    struct thread *cur = thread_current();
+    if (cur->as_child) {
+       cur->as_child->load_success = success;
+       sema_up(&cur->as_child->load_sema);                 //sema_up으로 부모의 sema_down(&load_sema)를 딱 한 번 깨움
+    }
+    // 🚧
+
+	/* If load failed, 해제 */
 	palloc_free_page (file_name);
 	if (!success)
 		return -1;
 
 	/* Start switched process. */
-	do_iret (&_if);
-	NOT_REACHED ();
+	do_iret (&_if);           // 유저모드로 점프(do_iret)
+	NOT_REACHED ();           // 성공 시 커널로 돌아오지 않음
 }
 
 
@@ -242,32 +302,47 @@ int process_exec (void *f_name) {
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
 
-// 🚧 initd 하나만 기다리는 최소 구현
-int process_wait (tid_t child_tid UNUSED) {
-	 if (initd_wait_inited) {
-        sema_down(&initd_wait);   /* initd가 exit하면 깨워짐 */
-        return initd_status;      /* sys_exit(status)에서 넘긴 값 */
-     }
-      return -1;
+// 🚧 부모가 “내 자식 중 child_tid인 애가 끝날 때까지 기다렸다가, 그 애의 종료코드를 받아오는” 함수
+int process_wait (tid_t child_tid) {
+  struct thread *parent = thread_current();
 
-	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
-	 * XXX:       to add infinite loop here before
-	 * XXX:       implementing the process_wait. */
-	// while(1);
-	
-	// return -1;
+  /* 부모의 children 리스트에서 child_tid와 매칭되는 노드 찾기 */
+  struct child *c = NULL;
+  for (struct list_elem *e = list_begin(&parent->children); e != list_end(&parent->children); e = list_next(e)) {
+    struct child *x = list_entry(e, struct child, elem);         // 리스트 노드(e)를 우리가 만든 struct child 구조체로 변환
+    if (x->tid == child_tid) { c = x; break; }                    // 찾던 자식이 맞으면 c에 잡고 루프 종료
+  }
+  if (!c) return -1;           // 실패: -1
+
+  /* 자식 종료 대기(이미 종료면 즉시 통과) */
+  sema_down(&c->wait_sema);                        // 자식이 끝났다는 신호(세마포어 up)를 기다림
+  int status = c->exit_status;                    
+
+  /* 리스트에서 자식 제거 후 해제 */
+  list_remove(&c->elem);          
+  free(c);
+
+  return status;                         // 자식의 종료코드를 부모에게 돌려줌
 }
 
-/* Exit the process. This function is called by thread_exit (). */
-void
-process_exit (void) {
-	struct thread *curr = thread_current ();
+
+/* 자식(현재 스레드)이 “나 이제 끝난다”를 부모에게 알려주는 곳. */
+void process_exit (void) {
+	struct thread *curr = thread_current ();              //지금 끝나려고 하는 스레드(= 자식)
 	/* TODO: Your code goes here.
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
-	process_cleanup ();
+	 /* 🚧 부모에게 종료 알림 */
+    if (curr->as_child) {                                     // 핸드셰이크 존재O
+		curr->as_child->exit_status = curr->exit_status;      // 데이터 쓰기: “내 종료코드”를 부모의 노드에 저장
+        curr->as_child->exited = true;                        // 상태 플래그(참고용)
+        sema_up(&curr->as_child->wait_sema);                  // 시그널 보내기: 부모가 sema_down()에서 기다리는 걸 깨움
+    }
+    // 🚧
+
+	process_cleanup ();                        //정리
 }
 
 /* Free the current process's resources. */
@@ -393,11 +468,12 @@ static bool load (const char *file_name, struct intr_frame *if_) {
     char *argv_kern[MAX_ARGC];       // 각 토큰의 시작 주소 포인터들 임시 저장 배열(커널 메모리에 존재)
     int argc = 0;                    // 인자 개수 카운터
 
+    char * cmdline = NULL;
     char *prog_name = NULL;          // 첫 토큰(= 실행 파일 이름)
     char *saveptr = NULL;            // strtok_r()의 상태 저장용 포인터
 
 	// 1) 수정 가능 복사본 확보
-	char * cmdline = palloc_get_page(0);           // 커널 힙에서 한 페이지(4KB) 할당
+	cmdline = palloc_get_page(0);           // 커널 힙에서 한 페이지(4KB) 할당
 	if(!cmdline) goto done;                       // 예외처리(메모리 부족)
 
 	if(strnlen(file_name, PGSIZE) >= PGSIZE) goto done;    // 예외처리(페이지 크기 이상)

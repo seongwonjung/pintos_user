@@ -11,6 +11,15 @@
 #include "vm/vm.h"
 #endif
 
+// 🚧 
+#ifdef USERPROG
+struct child;     // 전방선언만(process.h에 정의됨
+struct file;      // 실행파일/FD 테이블 포인터용 전방선언
+#endif
+
+
+struct lock;   // waiting_lock 용
+
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */
@@ -105,7 +114,17 @@ struct thread {
   struct list_elem elem; /* List element. */
 
 #ifdef USERPROG
-  /* Owned by userprog/process.c. */
+  // 🚧  프로세스 관계
+  struct thread *parent;     // 부모
+  struct list children;      // 내 자식들의 struct child 노드들을 연결하는 리스트
+  struct child *as_child;    // 부모가 만들어준 내 child 노드 가리킴
+  int exit_status;           // 종료 코드
+
+  /* 실행 파일(rox-*) */
+  struct file *running_file; // 실행 중인 ELF 파일 핸들(실행 중 write 금지/해제 위해 보관)
+  // 🚧 
+
+  /* 주소 공간 */
   uint64_t *pml4; /* Page map level 4 */
 #ifdef VM
   /* Table for whole virtual memory owned by thread. */

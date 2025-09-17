@@ -22,7 +22,9 @@
         "gdt.h": "c",
         "process.h": "c",
         "stddef.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "interrupt.h": "c",
+        "malloc.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

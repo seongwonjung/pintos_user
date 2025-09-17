@@ -9,10 +9,8 @@
 #include "intrinsic.h"
 
 // 🚧 
-#include <stddef.h>            // size_t
-#include "userprog/process.h"   // process_set_exit()
-#include "lib/kernel/stdio.h"     // putbuf
-
+#include <stddef.h>                 // size_t
+#include "lib/kernel/stdio.h"       // putbuf()
 
 
 void syscall_entry (void);
@@ -45,17 +43,20 @@ syscall_init (void) {
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
 }
 
-// 🚧 
-/* ---- 최소 시스템콜 구현 ---- */
+
+// 🚧
+
+// “프로세스가 나 끝낼게요!”라고 말할 때 해야 할 일
 static void sys_exit (int status) {
-   /* 🔸 테스트가 기대하는 종료 메시지 출력 */
-  printf("%s: exit(%d)\n", thread_name(), status);
+  struct thread *cur = thread_current();
+  printf("%s: exit(%d)\n", thread_name(), status);   /* 테스트가 기대하는 종료 메시지 출력 */
   
-  process_set_exit(status);
-  thread_exit();
-  __builtin_unreachable();
+  cur->exit_status = status;                       // 종료 코드 "현재 스레드 구조체"에 저장
+  thread_exit();                                   // 커널 스레드 종료
+  // __builtin_unreachable();                         // 컴파일러 힌트 코드
 }
 
+// “쓰기(sys_write) 요청 들어오면 어디로 내보낼까?”
 static int sys_write (int fd, const void *buf, unsigned size) {
   if (fd == 1) {                /* stdout */
     if (buf && size) putbuf((const char *)buf, (size_t)size);
@@ -64,26 +65,24 @@ static int sys_write (int fd, const void *buf, unsigned size) {
   return -1;
 }
 
+// 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
 void syscall_handler (struct intr_frame *f) {
-  uint64_t num = f->R.rax;
+  uint64_t num = f->R.rax;                    // 시스템콜 번호(RAX 확인)
   switch (num) {
-    case SYS_EXIT:
-      sys_exit((int)f->R.rdi);         // rdi: status
+    case SYS_EXIT:                            // exit(status) => RDI만 사용
+      sys_exit((int)f->R.rdi);                // 첫 번째 인자(RDI)를 int로 변환해서 sys_exit에 넘김
       break;
 
-    case SYS_WRITE:                    // rdi=fd, rsi=buf, rdx=size
-      f->R.rax = (uint64_t)sys_write((int)f->R.rdi,
-                                     (const void *)f->R.rsi,
-                                     (unsigned)f->R.rdx);
+    case SYS_WRITE:                    // rdi=fd, rsi=buf(유저 주소), rdx=size
+      f->R.rax = (uint64_t)sys_write((int)f->R.rdi, (const void *)f->R.rsi, (unsigned)f->R.rdx);
       break;
 
     default:
-      sys_exit(-1);
+      sys_exit(-1);      // 모르는 시스템콜 번호면 "프로세스 종료(-1)"로 처리
   }
 }
 
-
-// 🚧 
+// 🚧
 
 /* The main system call interface */
 // TODO: Your implementation goes here.

@@ -268,6 +268,12 @@ tid_t thread_create(const char *name, int priority, thread_func *function,
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
 
+  // 🚧 
+  #ifdef USERPROG
+   t->parent = thread_current();  // 부모포인터 연결
+  #endif
+  // 🚧 
+
   /* Call the kernel_thread if it scheduled.
    * Note) rdi is 1st argument, and rsi is 2nd argument. */
   t->tf.rip = (uintptr_t)kernel_thread;
@@ -331,8 +337,7 @@ void thread_unblock(struct thread *t) {
   old_level = intr_disable();
   ASSERT(t->status == THREAD_BLOCKED);
 
-  list_insert_ordered(&ready_list, &t->elem, cmp_priority,
-                      NULL);  // 2️⃣ "대기->정렬": 내림차순 =>
+  list_insert_ordered(&ready_list, &t->elem, cmp_priority, NULL);  // 2️⃣ "대기->정렬": 내림차순 =>
                               // ready_list: 내림차순
   t->status = THREAD_READY;
 
@@ -518,6 +523,16 @@ static void init_thread(struct thread *t, const char *name, int priority) {
       priority;  // 3️⃣ 원래 우선순위 저장(One)  => 복원 기준
   list_init(&t->donations);  // 3️⃣ 기부자 목록 초기화(muti)
   t->waiting_lock = NULL;    // 3️⃣ 현재 기다리는 락X(muti)
+
+  // 🚧 템플릿 기본값 세팅
+#ifdef USERPROG
+  t->parent = NULL;
+  list_init(&t->children);
+  t->as_child = NULL;
+  t->exit_status = -1;
+  t->running_file = NULL;
+#endif
+  // 🚧 
 
   t->magic = THREAD_MAGIC;
 }
