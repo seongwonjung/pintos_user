@@ -22,13 +22,10 @@
 #include "vm/vm.h"
 #endif
 
-
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
-static char* my_strdup(const char* s);
-#define MAX_ARGS 64
 
 /* General process initializer for initd and other process. */
 static void
@@ -161,67 +158,52 @@ error:
 	thread_exit ();
 }
 
-/* 
-현재 실행 컨텍스트를 f_name으로 전환합니다.
-실패 시 -1을 반환합니다. 
-*/
- // argumentation passing 구현 - testcase - 
+/* Switch the current execution context to the f_name.
+ * Returns -1 on fail. */
 int
 process_exec (void *f_name) {
 	char *file_name = f_name;
 	bool success;
 
-	/* 
-	thread 구조체의 intr_frame 멤버를 사용하면 안 됩니다.
-	현재 스레드에서 다른 스레드로 교체(reschedule)될 때, 해당 시점의 실행 정보가 이 멤버에 덮어씌워지기 때문입니다. 
-	*/
-
+	/* We cannot use the intr_frame in the thread structure.
+	 * This is because when current thread rescheduled,
+	 * it stores the execution information to the member. */
 	struct intr_frame _if;
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
-	/* 먼저 현재 컨텍스트를 종료합니다. */
+	/* We first kill the current context */
 	process_cleanup ();
 
-	/* 그리고 나서 바이너리를 로드합니다. */
+	/* And then load the binary */
 	success = load (file_name, &_if);
 
-	/* 만약 로드 실패시 종료합니다. */
+	/* If load failed, quit. */
 	palloc_free_page (file_name);
 	if (!success)
 		return -1;
 
-	/* 전환된 프로세스를 실행합니다. */
+	/* Start switched process. */
 	do_iret (&_if);
 	NOT_REACHED ();
 }
 
 
-/* 스레드 TID가 종료될 때까지 기다리고, 그 종료 상태(exit status)를 반환한다.
-만약 커널에 의해 종료된 경우(즉, 예외로 인해 강제 종료된 경우)라면 -1을 반환한다.
-
-만약 TID가 유효하지 않거나, 호출한 프로세스의 자식 프로세스가 아니거나, 
-혹은 해당 TID에 대해 process_wait()이 이미 성공적으로 호출된 적이 있다면, 이 함수는 기다리지 않고 즉시 -1을 반환한다.
-
-이 함수는 문제 2-2에서 구현될 예정이다. 현재는 아무 동작도 하지 않는다. */
-
+/* Waits for thread TID to die and returns its exit status.  If
+ * it was terminated by the kernel (i.e. killed due to an
+ * exception), returns -1.  If TID is invalid or if it was not a
+ * child of the calling process, or if process_wait() has already
+ * been successfully called for the given TID, returns -1
+ * immediately, without waiting.
+ *
+ * This function will be implemented in problem 2-2.  For now, it
+ * does nothing. */
 int
 process_wait (tid_t child_tid UNUSED) {
-	/* XXX: 힌트) process_wait(initd) 때문에 Pintos가 바로 꺼질 수 있습니다.
-	* XXX:       그러니까 process_wait을 아직 구현하기 전이라면,
-	* XXX:       여기다가 임시로 무한 루프 걸어두는 게 좋습니다. */
-	while (1) {
-
-	}
-	return -1;
-}
-
-void process_write (int fd, const void* buffer, unsigned size) {
-	if (fd == 1) {
-		putbuf(buffer, size);
-		return size;
-	}
+	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
+	 * XXX:       to add infinite loop here before
+	 * XXX:       implementing the process_wait. */
 	return -1;
 }
 
@@ -229,10 +211,10 @@ void process_write (int fd, const void* buffer, unsigned size) {
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
-	/* TODO: 여기에 코드를 작성하세요.
-	* TODO: 프로세스 종료 메시지를 구현하세요 (자세한 내용은
-	* TODO: project2/process_termination.html 참조).
-	* TODO: 이곳에서 프로세스 자원 정리(resource cleanup)를 구현하는 것을 권장합니다. */
+	/* TODO: Your code goes here.
+	 * TODO: Implement process termination message (see
+	 * TODO: project2/process_termination.html).
+	 * TODO: We recommend you to implement process resource cleanup here. */
 
 	process_cleanup ();
 }
@@ -334,11 +316,10 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes,
 		bool writable);
 
-/* FILE_NAME에서 ELF 실행 파일을 현재 스레드로 로드합니다.
- * 실행 파일의 진입점(entry point)을 *RIP에 저장하고,
- * 초기 스택 포인터(initial stack pointer)를 *RSP에 저장합니다.
- * 성공하면 true를, 실패하면 false를 반환합니다.
- */
+/* Loads an ELF executable from FILE_NAME into the current thread.
+ * Stores the executable's entry point into *RIP
+ * and its initial stack pointer into *RSP.
+ * Returns true if successful, false otherwise. */
 static bool
 load (const char *file_name, struct intr_frame *if_) {
 	struct thread *t = thread_current ();
@@ -347,50 +328,21 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
-	/* ------------------------ 입력받은 명령어 파싱 섹션 ---------------------------*/
-	/* 원본이 손상가지 않도록 원본복사 */
-	/* my_strdup(const char* s) => malloc + strcpy s를 복사하여 메모리를 할당받고 저장*/
-	char* token ;
-	char* copy ;
-	char* save = NULL;
-	char* argv[MAX_ARGS];
-	int argc = 0;
-	uint64_t argv_addr[MAX_ARGS]; // argv 포인터들을 저장할 배열
-	uint64_t *stack_ptr = (uint64_t *)if_->rsp; //스택포인터
-	copy = my_strdup(file_name);
-	
-	if (copy == NULL) {
-		goto done;
-	};
 
-	/* 공백을 기준으로 토큰 분리 */
-	token = strtok_r(copy, "\t\r\n ", &save);
-	while (token != NULL && argc < MAX_ARGS - 1) {
-		argv[argc++] = token;
-		token = strtok_r(NULL, "\t\r\n ", &save);
-	}
-
-	//센티넬
-	argv[argc] = NULL;
-
-	/* 할당받은 문자열 메모리 공간 반환 */
-	file_name = argv[0];
-	/* ------------------------------------------------------------------------*/
-
-	/* 페이지 테이블 생성 및 활성호ㅏ */	
+	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
 		goto done;
 	process_activate (thread_current ());
 
-	/* 실행 파일 열기 */
+	/* Open executable file. */
 	file = filesys_open (file_name);
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
 
-	/* ELF헤더를 읽고 검증. */
+	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
 			|| ehdr.e_type != 2
@@ -401,8 +353,8 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: error loading executable\n", file_name);
 		goto done;
 	}
-	
-	/* Read program headers. 프로그램 헤더 읽기 */
+
+	/* Read program headers. */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
 		struct Phdr phdr;
@@ -455,67 +407,24 @@ load (const char *file_name, struct intr_frame *if_) {
 		}
 	}
 
-	/* 유저스택 초기화. */
+	/* Set up stack. */
 	if (!setup_stack (if_))
 		goto done;
 
-	/* 프로그램 시작주소 설정 */
+	/* Start address. */
 	if_->rip = ehdr.e_entry;
 
-	
-	/* ------------------------------- 인자 스택에 적재 -------------------------------------*/
-	/* 1. 문자열 복사 */
-	for (int i = argc-1; i >= 0; i--) {
-		size_t len = strlen(argv[i]) + 1;
-		stack_ptr = (uint64_t *)((char *)stack_ptr - len);
-		memcpy(stack_ptr, argv[i], len);
-		argv_addr[i] = (char *)stack_ptr;  // 나중에 포인터 배열 만들 때 필요
-	}
+	/* TODO: Your code goes here.
+	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 
-	/* 2. 정렬 -> 8바이트 배수 */
-	stack_ptr = (uint64_t *)((uintptr_t)stack_ptr & ~0x7);
-
-	/* 3. argv 포인터 배열 push */
-	stack_ptr--;
-	*stack_ptr = 0; // NULL terminator
-	for (int i = argc-1; i >= 0; i--) {
-		stack_ptr--;
-		*stack_ptr = (uint64_t)argv_addr[i];
-	}
-
-	/* 4. argc 적재 */
-	stack_ptr--;
-	*stack_ptr = argc;
-
-	if_->R.rsi = if_->rsp;
-	/* 5. dummy return address push */
-	stack_ptr--;
-	*stack_ptr = 0;
-
-	/* 최종 rsp 업데이트 */
-	if_->rsp = (uint64_t)stack_ptr;
-	if_->R.rdi = (uint64_t)argc;
-	
-	/* -------------------------------------------------------------------------------- */
-	hex_dump(stack_ptr, USER_STACK, USER_STACK - (uintptr_t)stack_ptr, true);
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
 	file_close (file);
-	free(copy);
 	return success;
 }
 
-/* --------------------------------palloc + mcmcpy구현---------------------------------- */
-static char* my_strdup(const char* s) {
-    size_t len = strlen(s) + 1;
-    char* copy = palloc_get_page(0);  // Pintos 커널에서는 malloc 대신 palloc
-    if (!copy) return NULL;
-    strlcpy(copy, s, len);
-    return copy;
-}
-/* ------------------------------------------------------------------------------------ */
 
 /* Checks whether PHDR describes a valid, loadable segment in
  * FILE and returns true if so, false otherwise. */
