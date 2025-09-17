@@ -26,9 +26,9 @@ void syscall_handler (struct intr_frame *);
 
 void
 syscall_init (void) {
-	write_msr(MSR_STAR, ((uint64_t)SEL_UCSEG - 0x10) << 48  |
-			((uint64_t)SEL_KCSEG) << 32);
-	write_msr(MSR_LSTAR, (uint64_t) syscall_entry);
+	write_msr(MSR_STAR, ((uint8_t)SEL_UCSEG - 0x10) << 48  |
+			((uint8_t)SEL_KCSEG) << 32);
+	write_msr(MSR_LSTAR, (uint8_t) syscall_entry);
 
 	/* The interrupt service rountine should not serve any interrupts
 	 * until the syscall_entry swaps the userland stack to the kernel
