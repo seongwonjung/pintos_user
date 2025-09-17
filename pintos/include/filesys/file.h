@@ -32,10 +32,6 @@ off_t file_tell(struct file *);
 off_t file_length(struct file *);
 
 /* An open file. */
-struct file {
-  struct inode *inode; /* File's inode. */
-  off_t pos;           /* Current position. */
-  bool deny_write;     /* Has file_deny_write() been called? */
-};
+struct file;
 
 #endif /* filesys/file.h */

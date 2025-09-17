@@ -6,6 +6,7 @@
 
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/inode.h"
 #include "intrinsic.h"
 #include "lib/kernel/stdio.h"
 #include "threads/flags.h"
@@ -26,6 +27,7 @@ static void sys_create(struct intr_frame *f);
 static void sys_halt(struct intr_frame *f);
 static void sys_open(struct intr_frame *f);
 static void sys_filesize(struct intr_frame *f);
+static void sys_close(struct intr_frame *f);
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -152,7 +154,7 @@ static const syscall_handler_t syscall_tbl[] = {
     [SYS_WRITE] = sys_write,
     [SYS_SEEK] = NULL,
     [SYS_TELL] = NULL,
-    [SYS_CLOSE] = NULL,
+    [SYS_CLOSE] = sys_close,
 };
 
 void syscall_init(void) {
@@ -282,6 +284,14 @@ int fd_alloc(struct thread *t, struct file *f) {
   return -1;
 }
 
+// fd테이블 fd_close 해주기
+void fd_close(struct thread *t, int fd) {
+  struct file *f = t->fd_table[fd];
+  t->fd_table[fd] = NULL;
+  t->next_fd = fd;
+  file_close(f);
+}
+
 static void sys_filesize(struct intr_frame *f) {
   int fd = (int)f->R.rdi;
   if (thread_current()->fd_table[fd] == NULL) {
@@ -296,4 +306,15 @@ static void sys_filesize(struct intr_frame *f) {
   return;
 }
 
-static void sys_close(struct intr_frame *f) {}
+static void sys_close(struct intr_frame *f) {
+  int fd = (int)f->R.rdi;
+  struct thread *cur = thread_current();
+
+  if ((fd < 2) || (fd > FD_MAX) || cur->fd_table[fd] == NULL) {
+    return;
+  }
+
+  lock_acquire(&filesys_lock);
+  fd_close(cur, fd);
+  lock_release(&filesys_lock);
+}
