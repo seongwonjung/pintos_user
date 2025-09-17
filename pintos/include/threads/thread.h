@@ -5,6 +5,8 @@
 #include <list.h>
 #include <stdint.h>
 
+#include "filesys/file.h"
+#include "filesys/filesys.h"
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #ifdef VM
@@ -28,6 +30,9 @@ typedef int tid_t;
 #define PRI_MIN 0      /* Lowest priority. */
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
+
+/* FD_MAX */
+#define FD_MAX 128
 
 /* A kernel thread or user process.
  *
@@ -106,12 +111,15 @@ struct thread {
   struct list_elem allelem;
 #ifdef USERPROG
   /* Owned by userprog/process.c. */
-  uint64_t *pml4;              /* Page map level 4 */
-  int exit_status;             // 자식 프로세스 종료크드
-  struct semaphore wait_sema;  // 동기화를 위한 세마포어
-  struct list child_list;
-  struct list_elem child_elem;
-  bool is_waited;  // 부모가 이미 wait했는지(중복 방지용)
+  uint64_t *pml4;               /* Page map level 4 */
+  int exit_status;              // 자식 프로세스 종료크드
+  struct semaphore wait_sema;   // 동기화를 위한 세마포어
+  struct list child_list;       // 자식 프로세스 리스트
+  struct list_elem child_elem;  // 리스트를 위한 elem
+  bool is_waited;               // 부모가 이미 wait했는지(중복 방지용)
+  /* FD 관련 필드 */
+  struct file *fd_table[FD_MAX];
+  int next_fd;
 #endif
 #ifdef VM
   /* Table for whole virtual memory owned by thread. */

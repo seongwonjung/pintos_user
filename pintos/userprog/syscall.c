@@ -4,6 +4,7 @@
 #include <string.h>
 #include <syscall-nr.h>
 
+#include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "intrinsic.h"
 #include "lib/kernel/stdio.h"
@@ -23,6 +24,8 @@ static void sys_exit(struct intr_frame *f);
 static void sys_exit_with_error(struct intr_frame *f);
 static void sys_create(struct intr_frame *f);
 static void sys_halt(struct intr_frame *f);
+static void sys_open(struct intr_frame *f);
+static void sys_filesize(struct intr_frame *f);
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -38,7 +41,10 @@ static void sys_halt(struct intr_frame *f);
 #define STRLEN_FAIL ((size_t)-1)
 // 파일 시스템 전역 락
 static struct lock filesys_lock;
+// 유효 주소 검사
+static bool validate_user_addr(const void *addr);
 
+/* 커널 버퍼 생성을 위한 헬퍼 함수들 */
 /*
 유저 공간 문자열 u의 길이를 최대 limit까지 측정한다.
 측정 중 (u+i)가 다른 페이지로 넘어갈 때마다 해당 페이지가
@@ -109,6 +115,9 @@ static char *copy_in_string(const char *u) {
   return k;  // 호출자가 palloc_free_page로 해제
 }
 
+/* FD를 위한 헬퍼 함수들 */
+int fd_alloc(struct thread *t, struct file *f);
+
 /* 사용자 주소 addr이 유효한지(NULL이 아니고, 사용자 영역에 있으며,
  * 매핑되었는지) 확인 */
 static bool validate_user_addr(const void *addr) {
@@ -130,20 +139,20 @@ typedef void (*syscall_handler_t)(
     struct intr_frame *f);  // 함수 포인터 형 재선언
 
 static const syscall_handler_t syscall_tbl[] = {
-    sys_halt,   /* 0. SYS_HALT */
-    sys_exit,   /* 1. SYS_EXIT */
-    NULL,       /* 2. SYS_FORK */
-    NULL,       /* 3. SYS_EXEC */
-    NULL,       /* 4. SYS_WAIT */
-    sys_create, /* 5. SYS_CREATE */
-    NULL,       /* 6. SYS_REMOVE */
-    NULL,       /* 7. SYS_OPEN */
-    NULL,       /* 8. SYS_FILESIZE */
-    NULL,       /* 9. SYS_READ */
-    sys_write,  /* 10. SYS_WRITE */
-    NULL,       /* 11. SYS_SEEK */
-    NULL,       /* 12. SYS_TELL */
-    NULL,       /* 13. SYS_CLOSE */
+    [SYS_HALT] = sys_halt,
+    [SYS_EXIT] = sys_exit,
+    [SYS_FORK] = NULL,
+    [SYS_EXEC] = NULL,
+    [SYS_WAIT] = NULL,
+    [SYS_CREATE] = sys_create,
+    [SYS_REMOVE] = NULL,
+    [SYS_OPEN] = sys_open,
+    [SYS_FILESIZE] = sys_filesize,
+    [SYS_READ] = NULL,
+    [SYS_WRITE] = sys_write,
+    [SYS_SEEK] = NULL,
+    [SYS_TELL] = NULL,
+    [SYS_CLOSE] = NULL,
 };
 
 void syscall_init(void) {
@@ -227,3 +236,64 @@ static void sys_exit_with_error(struct intr_frame *f) {
   f->R.rdi = (uint64_t)-1;
   sys_exit(f);
 }
+
+static void sys_open(struct intr_frame *f) {
+  const char *u_filename = f->R.rdi;
+  // 유효 주소인지 확인
+  if (!validate_user_addr(u_filename)) {
+    sys_exit_with_error(f);
+    return;
+  }
+  // 커널에 복사
+  char *k_filename = copy_in_string(u_filename);
+  if (!k_filename || k_filename[0] == '\0') {
+    if (k_filename) palloc_free_page(k_filename);
+    f->R.rax = -1;
+    return;
+  }
+
+  lock_acquire(&filesys_lock);
+  struct file *file = filesys_open(k_filename);
+  lock_release(&filesys_lock);
+  palloc_free_page(k_filename);
+
+  if (file == NULL) {
+    f->R.rax = -1;
+    return;
+  }
+  // FD 배정해주기
+  int fd = fd_alloc(thread_current(), file);
+  if (fd < 2 || fd >= FD_MAX) {
+    file_close(file);
+    f->R.rax = -1;
+    return;
+  }
+  f->R.rax = fd;
+}
+
+// fd테이블에서 할당 가능 fd_entry 찾아주기
+int fd_alloc(struct thread *t, struct file *f) {
+  for (t->next_fd; t->next_fd < FD_MAX; t->next_fd++) {
+    if (t->fd_table[t->next_fd] == NULL) {
+      t->fd_table[t->next_fd] = f;
+      return t->next_fd++;
+    }
+  }
+  return -1;
+}
+
+static void sys_filesize(struct intr_frame *f) {
+  int fd = (int)f->R.rdi;
+  if (thread_current()->fd_table[fd] == NULL) {
+    f->R.rax = -1;
+    return;
+  }
+  lock_acquire(&filesys_lock);
+  off_t file_size = file_length(thread_current()->fd_table[fd]);
+  lock_release(&filesys_lock);
+
+  f->R.rax = file_size;
+  return;
+}
+
+static void sys_close(struct intr_frame *f) {}

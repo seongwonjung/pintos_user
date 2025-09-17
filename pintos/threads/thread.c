@@ -525,10 +525,14 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   t->magic = THREAD_MAGIC;
 
 #ifdef USERPROG
+  /* 부모-자식 wait를 위한 필드 초기화 */
   t->exit_status = -1;
   sema_init(&t->wait_sema, 0);
   list_init(&t->child_list);
   t->is_waited = false;
+  /* FDT 초기화 */
+  t->next_fd = 2;  // 0 = stdin, 1 = stdout
+  for (int i = 0; i < FD_MAX; i++) t->fd_table[i] = NULL;
 #endif
 }
 
