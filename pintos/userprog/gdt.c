@@ -74,7 +74,7 @@ static struct segment_desc gdt[SEL_CNT] = {
 
 struct desc_ptr gdt_ds = {
 	.size = sizeof(gdt) - 1,
-	.address = (uint8_t) gdt
+	.address = (uint64_t) gdt
 };
 
 /* Sets up a proper GDT.  The bootstrap loader's GDT didn't
@@ -87,19 +87,19 @@ gdt_init (void) {
 	struct task_state *tss = tss_get ();
 
 	*tss_desc = (struct segment_descriptor64) {
-		.lim_15_0 = (uint8_t) (sizeof (struct task_state)) & 0xffff,
-		.base_15_0 = (uint8_t) (tss) & 0xffff,
-		.base_23_16 = ((uint8_t) (tss) >> 16) & 0xff,
+		.lim_15_0 = (uint64_t) (sizeof (struct task_state)) & 0xffff,
+		.base_15_0 = (uint64_t) (tss) & 0xffff,
+		.base_23_16 = ((uint64_t) (tss) >> 16) & 0xff,
 		.type = 0x9,
 		.s = 0,
 		.dpl = 0,
 		.p = 1,
-		.lim_19_16 = ((uint8_t)(sizeof (struct task_state)) >> 16) & 0xf,
+		.lim_19_16 = ((uint64_t)(sizeof (struct task_state)) >> 16) & 0xf,
 		.avl = 0,
 		.rsv1 = 0,
 		.g = 0,
-		.base_31_24 = ((uint8_t)(tss) >> 24) & 0xff,
-		.base_63_32 = ((uint8_t)(tss) >> 32) & 0xffffffff,
+		.base_31_24 = ((uint64_t)(tss) >> 24) & 0xff,
+		.base_63_32 = ((uint64_t)(tss) >> 32) & 0xffffffff,
 		.res1 = 0,
 		.clear = 0,
 		.res2 = 0

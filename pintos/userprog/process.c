@@ -204,6 +204,10 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+  while (1) {
+
+  }
+  
 	return -1;
 }
 
@@ -275,6 +279,7 @@ process_activate (struct thread *next) {
 #define PF_X 1          /* Executable. */
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
+#define MAX_ARGU 64
 
 /* Executable header.  See [ELF1] 1-4 to 1-8.
  * This appears at the very beginning of an ELF binary. */
@@ -315,6 +320,7 @@ static bool validate_segment (const struct Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes,
 		bool writable);
+static void argument_passing (const char *cmdline, struct intr_frame *if_);
 
 /* Loads an ELF executable from FILE_NAME into the current thread.
  * Stores the executable's entry point into *RIP
@@ -328,6 +334,9 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+  char *save = NULL;
+  char *prog;
+  char *copy = palloc_get_page(PAL_ZERO);
 
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
@@ -335,12 +344,17 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	process_activate (thread_current ());
 
-	/* Open executable file. */
-	file = filesys_open (file_name);
-	if (file == NULL) {
-		printf ("load: %s: open failed\n", file_name);
-		goto done;
-	}
+  /* 1) program_name만 뽑기 위한 복사본 */
+  if (copy == NULL) return false;
+  strlcpy(copy, file_name, PGSIZE);
+
+  prog = strtok_r(copy, " ", &save);
+
+  if (prog == NULL) goto done;
+
+  /* 2) 실행파일 오픈 (program_name만 사용) */
+  file = filesys_open(prog);
+  if (file == NULL) goto done;
 
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -416,6 +430,10 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+  argument_passing(file_name, if_);
+
+  size_t dump_len = 128;
+  hex_dump((size_t) if_->rsp, (const void *) if_->rsp, dump_len, true);
 
 	success = true;
 
@@ -425,6 +443,72 @@ done:
 	return success;
 }
 
+// 커멘드라인을 파싱한 후에 유저스택에 저장, 레지스터에 반영
+static void
+argument_passing (const char *cmdline, struct intr_frame *if_) {
+  /* cmdline 토큰화용 임시 버퍼(지역 수명) */
+  char *buf = palloc_get_page(PAL_ZERO);
+  ASSERT(buf != NULL);
+  strlcpy(buf, cmdline, PGSIZE);
+
+  /* ---- (아래 네 변수는 전부 ‘지역’) ---- */
+  char *argv[64];          // 임시 포인터 배열
+  void *arg_addrs[64];     // 유저스택에 복사된 문자열들의 주소(임시 저장)
+  int argc = 0;
+  char *save_ptr = NULL;
+
+  for (char *tok = strtok_r(buf, " ", &save_ptr);
+       tok != NULL;
+       tok = strtok_r(NULL, " ", &save_ptr)) {
+    argv[argc++] = tok;
+    // (경계 체크: argc >= 64면 오류 처리)
+  }
+
+  /* 유저 스택 포인터 가져오기 */
+  uint8_t *rsp = (uint8_t *) if_->rsp;
+
+  /* 1) 문자열(토큰) 바이트들을 역순으로 유저스택에 복사 */
+  for (int i = argc - 1; i >= 0; --i) {
+    size_t len = strlen(argv[i]) + 1;  // 널 포함
+    rsp -= len;
+    memcpy(rsp, argv[i], len);
+    arg_addrs[i] = (void *) rsp;       // “유저스택 내” 문자열 시작 주소
+  }
+
+  /* 2) 정렬(8B) */
+  while ((uintptr_t)rsp % 8 != 0) *--rsp = 0;
+
+  /* 3) NULL 센티넬 */
+  rsp -= sizeof(char *);
+  *(char **)rsp = NULL;
+
+  /* 4) argv[i] 포인터들(= 위에서 저장한 유저 주소) 푸시
+        ↓ 이 루프가 끝나면 rsp가 argv[0]이 놓인 위치를 가리킴 */
+  for (int i = argc - 1; i >= 0; --i) {
+    rsp -= sizeof(char *);
+    *(char **)rsp = (char *)arg_addrs[i];
+  }
+
+  /* 5) argv 배열의 시작 주소를 값으로 한 번 더 푸시 */
+  char **argv_ptr = (char **)rsp;   // 현재 rsp가 곧 argv[0]의 주소
+  rsp -= sizeof(char **);
+  *(char ***)rsp = argv_ptr;
+
+  /* 6) argc 푸시 */
+  rsp -= sizeof(int);
+  *(int *)rsp = argc;
+
+  /* 7) fake return (0) */
+  rsp -= sizeof(void *);
+  *(void **)rsp = 0;
+
+  /* 8) 레지스터 반영(밖에 남기는 “유일한 결과”) */
+  if_->R.rdi = argc;                 // 1st arg
+  if_->R.rsi = (uint64_t)argv_ptr;   // 2nd arg
+  if_->rsp  = (uint64_t)rsp;
+
+  palloc_free_page(buf);             // 지역 임시 버퍼 수명 종료
+}
 
 /* Checks whether PHDR describes a valid, loadable segment in
  * FILE and returns true if so, false otherwise. */

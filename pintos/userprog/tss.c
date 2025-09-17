@@ -70,5 +70,5 @@ tss_get (void) {
 void
 tss_update (struct thread *next) {
 	ASSERT (tss != NULL);
-	tss->rsp0 = (uint8_t) next + PGSIZE;
+	tss->rsp0 = (uint64_t) next + PGSIZE;
 }
