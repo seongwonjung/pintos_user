@@ -1,20 +1,27 @@
 #include "userprog/syscall.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <syscall-nr.h>
 
+#include "filesys/filesys.h"
 #include "intrinsic.h"
 #include "lib/kernel/stdio.h"
 #include "threads/flags.h"
+#include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/loader.h"
+#include "threads/palloc.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
 #include "userprog/gdt.h"
+
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
 static void sys_write(struct intr_frame *f);
 static void sys_exit(struct intr_frame *f);
 static void sys_exit_with_error(struct intr_frame *f);
+static void sys_create(struct intr_frame *f);
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -27,6 +34,79 @@ static void sys_exit_with_error(struct intr_frame *f);
 #define MSR_STAR 0xc0000081         /* Segment selector msr */
 #define MSR_LSTAR 0xc0000082        /* Long mode SYSCALL target */
 #define MSR_SYSCALL_MASK 0xc0000084 /* Mask for the eflags */
+#define STRLEN_FAIL ((size_t)-1)
+// 파일 시스템 전역 락
+static struct lock filesys_lock;
+
+/*
+유저 공간 문자열 u의 길이를 최대 limit까지 측정한다.
+측정 중 (u+i)가 다른 페이지로 넘어갈 때마다 해당 페이지가
+유저가 읽을 수 있는 유효 매핑인지 validate_user_addr로 검증한다.
+limit을 넘기거나 검증 실패 시 STRLEN_FAIL을 반환한다.
+
+왜 페이지 단위 검증인가?
+- 문자열이 페이지 끝에서 시작해 다음 페이지로 넘어갈 수 있음.
+- 다음 페이지가 미매핑/무권한이면 경계에서 안전하게 중단해야 함.
+*/
+static size_t strnlen_usr(const char *u, size_t limit) {
+  size_t i = 0;
+  void *last_pg = NULL;  // 마지막으로 검증한 페이지의 시작 주소
+  while (i < limit) {
+    void *pg = pg_round_down(u + i);  // (u+i)가 속한 페이지의 시작 주소
+    if (pg != last_pg) {              // 새 페이지로 넘어간 시점에만 검증
+      if (!validate_user_addr(u + i))
+        return STRLEN_FAIL;  // 해당 주소(페이지)가 유효한지
+      last_pg = pg;
+    }
+    if (*(uint8_t *)(u + i) == '\0') return i;  // 널 종료 발견
+    i++;
+  }
+  return STRLEN_FAIL;  // limit 내에 널 없음 → 실패
+}
+/*
+유저 버퍼 usrc에서 커널 버퍼 kdst로 n바이트를 복사한다.
+바이트를 진행하다가 페이지 경계(pg_round_down)로 바뀌면 그때마다
+새 페이지가 유효한지(validate_user_addr) 확인한다.
+한 페이지에서 여러 바이트는 검증 1회로 처리(효율성).
+*/
+static bool copy_from_user(void *kdst, const void *usrc, size_t n) {
+  size_t i = 0;
+  void *last_pg = NULL;
+  while (i < n) {
+    void *pg =
+        pg_round_down((const uint8_t *)usrc + i);  // 현재 바이트의 페이지 시작
+    if (pg != last_pg) {  // 페이지가 바뀐 경우에만 검증
+      if (!validate_user_addr((const uint8_t *)usrc + i))
+        return false;  // 유저가 읽을 수 있는가?
+      last_pg = pg;
+    }
+    ((uint8_t *)kdst)[i] = *((const uint8_t *)usrc + i);  // 실제 1바이트 복사
+    i++;
+  }
+  return true;
+}
+/*
+유저 문자열 u를 한 페이지(PGSIZE) 한도 내에서 커널에 새 페이지를 할당해
+복사한다.
+- 길이 측정은 strnlen_usr(u, PGSIZE)로 수행(널 포함 길이가 PGSIZE 이내여야 함)
+- 문자열이 '현재 페이지의 남은 공간 + 다음 페이지 일부' 같은 형태로
+  PGSIZE를 넘어가면 STRLEN_FAIL 처리된다(목적지 버퍼도 한 페이지이기 때문).
+*/
+static char *copy_in_string(const char *u) {
+  const size_t LIMIT = PGSIZE;         // 목적지 버퍼(1페이지) 용량 한도
+  size_t len = strnlen_usr(u, LIMIT);  // 페이지 경계 검증 포함 길이 측정
+  if (len == STRLEN_FAIL) return NULL;
+  char *k = palloc_get_page(PAL_ZERO);  // 커널 공간 1페이지 할당
+  if (!k) {
+    return NULL;
+  }
+  // 널 포함(len+1)만큼 복사(복사 중에도 페이지 경계 검증 수행)
+  if (!copy_from_user(k, u, len + 1)) {
+    palloc_free_page(k);
+    return NULL;
+  }
+  return k;  // 호출자가 palloc_free_page로 해제
+}
 
 /* 사용자 주소 addr이 유효한지(NULL이 아니고, 사용자 영역에 있으며,
  * 매핑되었는지) 확인 */
@@ -49,20 +129,20 @@ typedef void (*syscall_handler_t)(
     struct intr_frame *f);  // 함수 포인터 형 재선언
 
 static const syscall_handler_t syscall_tbl[] = {
-    NULL,      /* SYS_HALT */
-    sys_exit,  /* SYS_EXIT */
-    NULL,      /* SYS_FORK */
-    NULL,      /* SYS_EXEC */
-    NULL,      /* SYS_WAIT */
-    NULL,      /* SYS_CREATE */
-    NULL,      /* SYS_REMOVE */
-    NULL,      /* SYS_OPEN */
-    NULL,      /* SYS_FILESIZE */
-    NULL,      /* SYS_READ */
-    sys_write, /* SYS_WRITE */
-    NULL,      /* SYS_SEEK */
-    NULL,      /* SYS_TELL */
-    NULL,      /* SYS_CLOSE */
+    sys_halt,   /* 0. SYS_HALT */
+    sys_exit,   /* 1. SYS_EXIT */
+    NULL,       /* 2. SYS_FORK */
+    NULL,       /* 3. SYS_EXEC */
+    NULL,       /* 4. SYS_WAIT */
+    sys_create, /* 5. SYS_CREATE */
+    NULL,       /* 6. SYS_REMOVE */
+    NULL,       /* 7. SYS_OPEN */
+    NULL,       /* 8. SYS_FILESIZE */
+    NULL,       /* 9. SYS_READ */
+    sys_write,  /* 10. SYS_WRITE */
+    NULL,       /* 11. SYS_SEEK */
+    NULL,       /* 12. SYS_TELL */
+    NULL,       /* 13. SYS_CLOSE */
 };
 
 void syscall_init(void) {
@@ -75,6 +155,8 @@ void syscall_init(void) {
    * mode stack. Therefore, we masked the FLAG_FL. */
   write_msr(MSR_SYSCALL_MASK,
             FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
+  // filesys_lock init
+  lock_init(&filesys_lock);
 }
 
 /* The main system call interface */
@@ -99,6 +181,7 @@ static void sys_write(struct intr_frame *f) {
   int fd = (int)f->R.rdi;
   const void *buf = (const void *)f->R.rsi;
   unsigned size = (unsigned)f->R.rdx;
+  // 유효 주소인지 확인
   if (!validate_user_addr(buf)) {
     sys_exit_with_error(f);
     return;
@@ -110,6 +193,31 @@ static void sys_write(struct intr_frame *f) {
     f->R.rax = -1;
   }
   return;
+}
+
+static void sys_create(struct intr_frame *f) {
+  const char *u_filename = (const char *)f->R.rdi;
+  unsigned init_size = (unsigned)f->R.rsi;
+  // 유효 주소인지 확인
+  if (!validate_user_addr(u_filename)) {
+    sys_exit_with_error(f);
+    return;
+  }
+
+  // k_filename 으로 복사(유저 -> 커널)
+  char *k_filename = copy_in_string(u_filename);
+  if (!k_filename || k_filename[0] == '\0') {
+    if (k_filename) palloc_free_page(k_filename);
+    f->R.rax = 0;
+    return;
+  }
+
+  lock_acquire(&filesys_lock);
+  bool succ = filesys_create(k_filename, init_size);
+  lock_release(&filesys_lock);
+
+  palloc_free_page(k_filename);
+  f->R.rax = succ ? 1 : 0;
 }
 
 static void sys_exit_with_error(struct intr_frame *f) {

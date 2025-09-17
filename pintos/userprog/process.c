@@ -379,25 +379,15 @@ static bool build_user_stack(struct intr_frame *if_, char **argv, int argc) {
     arg_addr[i] = if_->rsp;
   }
 
-  // 2. pad 계산 및 push
-  // uint64_t rsp_now = if_->rsp;
-  // uint64_t ptr_bytes = 8 * (argc + 2);
-  // uint64_t pad = (rsp_now - ptr_bytes) & 0x7;  // final_without_pad % 8
-
-  // if (pad) {
-  //   uint16_t zeros[8] = {0};
-  //   if (!push_bytes(if_, zeros, pad)) return false;
-  // }
-
-  // 2. 16바이트 정렬을 위한 패딩 추가
+  // 2. 8바이트 정렬을 위한 패딩 추가
   size_t total_pointers_size = (argc + 1) * sizeof(char *);
-  size_t remainder = (if_->rsp - total_pointers_size) % 16;
+  size_t remainder = (if_->rsp - total_pointers_size) % 8;
   if (remainder > 0) {
     if_->rsp -= remainder;
     memset((void *)if_->rsp, 0, remainder);
   }
 
-  // 3. NULL, argv[i] 포인터들, argv, argc, fake ret
+  // 3. NULL, argv[i] 포인터들, fake ret
   if (!push_pointer(if_, 0)) return false;  // NULL push
 
   for (int i = argc - 1; i >= 0; i--) {  // argv[i] 포인터들 push
