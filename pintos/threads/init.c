@@ -39,7 +39,7 @@
 #endif
 
 /* Page-map-level-4 with kernel mappings only. */
-uint64_t *base_pml4;
+uint8_t *base_pml4;
 
 #ifdef FILESYS
 /* -f: Format the file system? */
@@ -52,7 +52,7 @@ bool power_off_when_done;
 bool thread_tests;
 
 static void bss_init (void);
-static void paging_init (uint64_t mem_end);
+static void paging_init (uint8_t mem_end);
 
 static char **read_command_line (void);
 static char **parse_options (char **argv);
@@ -67,7 +67,7 @@ int main (void) NO_RETURN;
 /* Pintos main program. */
 int
 main (void) {
-	uint64_t mem_end;
+	uint8_t mem_end;
 	char **argv;
 
 	/* Clear BSS and get machine's RAM size. */
@@ -144,19 +144,19 @@ bss_init (void) {
  * and then sets up the CPU to use the new page directory.
  * Points base_pml4 to the pml4 it creates. */
 static void
-paging_init (uint64_t mem_end) {
-	uint64_t *pml4, *pte;
+paging_init (uint8_t mem_end) {
+	uint8_t *pml4, *pte;
 	int perm;
 	pml4 = base_pml4 = palloc_get_page (PAL_ASSERT | PAL_ZERO);
 
 	extern char start, _end_kernel_text;
 	// Maps physical address [0 ~ mem_end] to
 	//   [LOADER_KERN_BASE ~ LOADER_KERN_BASE + mem_end].
-	for (uint64_t pa = 0; pa < mem_end; pa += PGSIZE) {
-		uint64_t va = (uint64_t) ptov(pa);
+	for (uint8_t pa = 0; pa < mem_end; pa += PGSIZE) {
+		uint8_t va = (uint8_t) ptov(pa);
 
 		perm = PTE_P | PTE_W;
-		if ((uint64_t) &start <= va && va < (uint64_t) &_end_kernel_text)
+		if ((uint8_t) &start <= va && va < (uint8_t) &_end_kernel_text)
 			perm &= ~PTE_W;
 
 		if ((pte = pml4e_walk (pml4, va, 1)) != NULL)

@@ -74,7 +74,7 @@ timer_calibrate (void) {
 		if (!too_many_loops (high_bit | test_bit))
 			loops_per_tick |= test_bit;
 
-	printf ("%'"PRIu64" loops/s.\n", (uint64_t) loops_per_tick * TIMER_FREQ);
+	printf ("%'"PRIu64" loops/s.\n", (uint8_t) loops_per_tick * TIMER_FREQ);
 }
 
 /* Returns the number of timer ticks since the OS booted. */

@@ -10,7 +10,7 @@
 extern size_t ram_pages;
 
 /* Page map level 4 with kernel mappings only. */
-extern uint64_t *base_pml4;
+extern uint8_t *base_pml4;
 
 /* -q: Power off when kernel tasks complete? */
 extern bool power_off_when_done;

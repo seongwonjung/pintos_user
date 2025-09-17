@@ -240,11 +240,11 @@ hash_empty (struct hash *h) {
 #define FNV_64_BASIS 0xcbf29ce484222325UL
 
 /* Returns a hash of the SIZE bytes in BUF. */
-uint64_t
+uint8_t
 hash_bytes (const void *buf_, size_t size) {
 	/* Fowler-Noll-Vo 32-bit hash, for bytes. */
 	const unsigned char *buf = buf_;
-	uint64_t hash;
+	uint8_t hash;
 
 	ASSERT (buf != NULL);
 
@@ -256,10 +256,10 @@ hash_bytes (const void *buf_, size_t size) {
 }
 
 /* Returns a hash of string S. */
-uint64_t
+uint8_t
 hash_string (const char *s_) {
 	const unsigned char *s = (const unsigned char *) s_;
-	uint64_t hash;
+	uint8_t hash;
 
 	ASSERT (s != NULL);
 
@@ -271,7 +271,7 @@ hash_string (const char *s_) {
 }
 
 /* Returns a hash of integer I. */
-uint64_t
+uint8_t
 hash_int (int i) {
 	return hash_bytes (&i, sizeof i);
 }

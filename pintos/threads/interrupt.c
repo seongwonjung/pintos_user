@@ -55,7 +55,7 @@ static struct gate idt[INTR_CNT];
 
 static struct desc_ptr idt_desc = {
 	.size = sizeof(idt) - 1,
-	.address = (uint64_t) idt
+	.address = (uint8_t) idt
 };
 
 
@@ -65,7 +65,7 @@ static struct desc_ptr idt_desc = {
 	ASSERT ((d) >= 0 && (d) <= 3); \
 	ASSERT ((t) >= 0 && (t) <= 15); \
 	*(g) = (struct gate) { \
-		.off_15_0 = (uint64_t) (function) & 0xffff, \
+		.off_15_0 = (uint8_t) (function) & 0xffff, \
 		.ss = SEL_KCSEG, \
 		.ist = 0, \
 		.rsv1 = 0, \
@@ -73,8 +73,8 @@ static struct desc_ptr idt_desc = {
 		.s = 0, \
 		.dpl = (d), \
 		.p = 1, \
-		.off_31_16 = ((uint64_t) (function) >> 16) & 0xffff, \
-		.off_32_63 = ((uint64_t) (function) >> 32) & 0xffffffff, \
+		.off_31_16 = ((uint8_t) (function) >> 16) & 0xffff, \
+		.off_32_63 = ((uint8_t) (function) >> 32) & 0xffffffff, \
 		.rsv2 = 0, \
 	}; \
 }
@@ -113,7 +113,7 @@ void intr_handler (struct intr_frame *args);
 /* Returns the current interrupt status. */
 enum intr_level
 intr_get_level (void) {
-	uint64_t flags;
+	uint8_t flags;
 
 	/* Push the flags register on the processor stack, then pop the
 	   value off the stack into `flags'.  See [IA32-v2b] "PUSHF"
@@ -382,7 +382,7 @@ intr_dump_frame (const struct intr_frame *f) {
 	   See [IA32-v2a] "MOV--Move to/from Control Registers" and
 	   [IA32-v3a] 5.14 "Interrupt 14--Page Fault Exception
 	   (#PF)". */
-	uint64_t cr2 = rcr2();
+	uint8_t cr2 = rcr2();
 	printf ("Interrupt %#04llx (%s) at rip=%llx\n",
 			f->vec_no, intr_names[f->vec_no], f->rip);
 	printf (" cr2=%016llx error=%16llx\n", cr2, f->error_code);
