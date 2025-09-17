@@ -9,11 +9,10 @@
 #include "intrinsic.h"
 
 // 🚧 
-#include <stddef.h>            // 🔹 size_t
+#include <stddef.h>            // size_t
 #include "userprog/process.h"   // process_set_exit()
+#include "lib/kernel/stdio.h"     // putbuf
 
-/* 🚧  헤더 없이 직접 선언 (콘솔 드라이버에 구현돼 있음) */
-void putbuf (const char *buffer, size_t n);
 
 
 void syscall_entry (void);

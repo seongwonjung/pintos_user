@@ -20,7 +20,9 @@
         "tests.h": "c",
         "inttypes.h": "c",
         "gdt.h": "c",
-        "process.h": "c"
+        "process.h": "c",
+        "stddef.h": "c",
+        "stdio.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
