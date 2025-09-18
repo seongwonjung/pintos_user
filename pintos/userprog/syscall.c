@@ -118,7 +118,23 @@ static char *copy_in_string(const char *u) {
 }
 
 /* FD를 위한 헬퍼 함수들 */
-int fd_alloc(struct thread *t, struct file *f);
+// fd테이블에서 할당 가능 fd_entry 찾아주기
+int fd_alloc(struct thread *t, struct file *f) {
+  for (t->next_fd; t->next_fd < FD_MAX; t->next_fd++) {
+    if (t->fd_table[t->next_fd] == NULL) {
+      t->fd_table[t->next_fd] = f;
+      return t->next_fd++;
+    }
+  }
+  return -1;
+}
+// fd테이블 fd_close 해주기
+void fd_close(struct thread *t, int fd) {
+  struct file *f = t->fd_table[fd];
+  t->fd_table[fd] = NULL;
+  t->next_fd = fd;
+  file_close(f);
+}
 
 /* 사용자 주소 addr이 유효한지(NULL이 아니고, 사용자 영역에 있으며,
  * 매핑되었는지) 확인 */
@@ -193,6 +209,11 @@ static void sys_halt(struct intr_frame *f) { power_off(); }
 
 static void sys_write(struct intr_frame *f) {
   int fd = (int)f->R.rdi;
+  // bad-fd 검사
+  if (fd < 0 || fd > FD_MAX) return;
+  // fd == 0 -> stdin
+  if (fd == 0) return;
+
   const void *buf = (const void *)f->R.rsi;
   unsigned size = (unsigned)f->R.rdx;
   // 유효 주소인지 확인
@@ -200,12 +221,32 @@ static void sys_write(struct intr_frame *f) {
     sys_exit_with_error(f);
     return;
   }
-  if (fd == 1) {
-    putbuf(buf, size);
-    f->R.rax = size;
-  } else {
+
+  // 커널영역의 버퍼로 담아서 하기
+  char *k_buf = palloc_get_page(PAL_ZERO);
+  k_buf = copy_in_string(buf);
+  // // NULL체크, 빈문자열인지 체크
+  if (!k_buf || k_buf[0] == '\0') {
+    if (k_buf) palloc_free_page(k_buf);
     f->R.rax = -1;
+    return;
   }
+
+  if (fd == 1) {  // fd == 1 -> stdout
+    putbuf(k_buf, size);
+  } else {  // 다른 열린 파일일때
+    struct file *file = thread_current()->fd_table[fd];
+    if (!file) {
+      palloc_free_page(k_buf);
+      f->R.rax = -1;
+      return;
+    }
+    lock_acquire(&filesys_lock);
+    size = file_write(file, k_buf, size);
+    lock_release(&filesys_lock);
+  }
+  palloc_free_page(k_buf);
+  f->R.rax = size;
   return;
 }
 
@@ -271,25 +312,6 @@ static void sys_open(struct intr_frame *f) {
     return;
   }
   f->R.rax = fd;
-}
-
-// fd테이블에서 할당 가능 fd_entry 찾아주기
-int fd_alloc(struct thread *t, struct file *f) {
-  for (t->next_fd; t->next_fd < FD_MAX; t->next_fd++) {
-    if (t->fd_table[t->next_fd] == NULL) {
-      t->fd_table[t->next_fd] = f;
-      return t->next_fd++;
-    }
-  }
-  return -1;
-}
-
-// fd테이블 fd_close 해주기
-void fd_close(struct thread *t, int fd) {
-  struct file *f = t->fd_table[fd];
-  t->fd_table[fd] = NULL;
-  t->next_fd = fd;
-  file_close(f);
 }
 
 static void sys_filesize(struct intr_frame *f) {
