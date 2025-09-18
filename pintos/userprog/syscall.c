@@ -1,5 +1,5 @@
 #include "userprog/syscall.h"
-#include <stdio.h>
+#include <stdio.h>                           
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
@@ -12,7 +12,7 @@
 #include <stddef.h>                 // size_t
 #include "lib/kernel/stdio.h"       // putbuf()
 
-// ⓒ
+// 🅲
 #include "threads/palloc.h"           // palloc_get_page(), palloc_free_page(), PGSIZE
 #include "threads/vaddr.h"            // is_user_vaddr()
 #include "threads/mmu.h"              // pml4_get_page()
@@ -20,8 +20,12 @@
 #include <string.h>                   // memcpy, strlen, strnlen 등
 #include "threads/synch.h"            // struct lock, lock_init(), lock_acquire(), lock_release()
 
-// ⓞ
-#include "filesys/file.h"     // file_close(), struct file
+// 🅾, 🆂, 🆁
+#include "filesys/file.h"     // struct file, file_open(), file_close(), file_read()  (일반 파일에서 읽기 위해)
+
+// 🆁
+#include "devices/input.h"   // input_getc()      (stdin(0) 읽을 때 키보드에서 한 바이트씩 가져오려면)
+#include <stdint.h>          // uintptr_t
 
 
 void syscall_entry (void);
@@ -46,7 +50,7 @@ static struct lock filesys_lock;         // 파일시스템 락(전역)
 #define MSR_SYSCALL_MASK 0xc0000084 /* Mask for the eflags */
 
 
-// ⓒ CREATE 헬퍼: 유저 문자열을 커널 페이지로 안전 복사
+// 🅲 CREATE 헬퍼: 유저 문자열을 커널 페이지로 안전 복사
 //  - 성공: palloc 페이지(4KB)에 NULL-terminated로 복사하여 포인터 반환
 //  - 실패: 프로세스 종료(exit -1)
 static char* copy_in_string_or_exit (const char *uaddr) {
@@ -84,7 +88,7 @@ static char* copy_in_string_or_exit (const char *uaddr) {
 }
 
 
-// ⓞ OPEN 헬퍼: 비어있는 FD 슬롯에 file* 등록하고 FD 번호 반환(없으면 -1)
+// 🅾 OPEN 헬퍼: 비어있는 FD 슬롯에 file* 등록하고 FD 번호 반환(없으면 -1)
 static int fd_install(struct thread *t, struct file *f){
 
   for(int fd = FD_MIN; fd < FD_MAX; fd++){            
@@ -136,7 +140,7 @@ static int sys_write (int fd, const void *buf, unsigned size) {
 }
 // 🚧
 
-// ⓒ CREATE: sys_create
+// 🅲 CREATE: sys_create
   //  ufile == NULL / bad ptr / kernel addr  -> exit(-1)
   //  ""(빈문자열)           -> return 0(false)
 static int sys_create (const char *ufile, unsigned initial_size) {
@@ -153,7 +157,7 @@ static int sys_create (const char *ufile, unsigned initial_size) {
   return ok;                         // 0(실패), 1(성공) 값을 반환
 }
 
-// ⓞ OPEN
+// 🅾 OPEN
 static int sys_open(const char *ufile){
   // 1) 준비
   char *kname = copy_in_string_or_exit(ufile);  // 유저 포인터 검증 & 커널 버퍼로 복사
@@ -170,7 +174,7 @@ static int sys_open(const char *ufile){
       struct thread *cur = thread_current();
       int newfd = fd_install(cur, f);         // FD테이블 장착
       
-      if(newfd > 0){
+      if(newfd >= FD_MIN){
         ret = newfd;                     // 성공
       } else{                            // 실패(FD 공간 부족)→ 열린 파일 닫고 실패
         lock_acquire(&filesys_lock);
@@ -184,6 +188,76 @@ static int sys_open(const char *ufile){
   palloc_free_page(kname);            // 커널 버퍼(4KB) 해제
   return ret;                         // newfd(성공), -1(실패) 값을 반환
 }
+
+// 🆂 CLOSE
+void sys_close(int fd){
+  struct thread *cur = thread_current();
+
+  // 1. 예외 처리
+  if(fd < FD_MIN || fd >= FD_MAX) return;         // 범위
+
+  struct file *f = cur->fd_table[fd];
+  if(f == NULL) return;                           // NULL
+  
+  // 2. CLOSE
+  cur->fd_table[fd] = NULL;             // 먼저 비우기            
+  
+  lock_acquire(&filesys_lock);        
+  file_close(f);                         // "파일 닫기"    
+  lock_release(&filesys_lock);
+}
+
+// 🆁 READ
+// static int sys_read(int fd, void *buffer, unsigned size){
+//   struct thread *cur = thread_current();
+
+//   // 1. 유저 인자 검증
+//   if(size == 0) return 0;                     // 0바이트 -> 검사 필요X (즉시 통과)
+//   if (buffer == NULL) sys_exit(-1);          // 예외처리(NULL)
+
+//   // 2. 유저 버퍼 범위 검증
+//   // 정수형으로 캐스팅(포인터 산술 위해)
+//   uintptr_t start = (uintptr_t)buffer;           
+//   uintptr_t end = start + (uintptr_t)size - 1;
+  
+//   if(end < start) sys_exit(-1);                   // 예외처리(오버플로우)
+
+//   if (!is_user_vaddr((void*)start) || !is_user_vaddr((void*)end)) sys_exit(-1);     // 예외처리(유저 가상 주소)
+
+//   // 3. 페이지 단위 매핑 검증
+//   // 페이지 경계에 맞춰 내림 (페이지 단위로 훑기 위해)
+//   uintptr_t p = (uintptr_t)pg_round_down((void*)start);        // 첫 페이지의 시작 주소
+//   uintptr_t last = (uintptr_t)pg_round_down((void*)end);       // 마지막 페이지의 시작 주소
+
+//   // 페이지 단위로 전 구간 매핑 확인
+//   for(; ; p += PGSIZE){
+//     if(pml4_get_page(cur->pml4, (void*)p) == NULL) sys_exit(-1);
+
+//     if(p == last) break;    // 마지막 페이지 -> 종료
+//   }
+  
+  
+//   if(fd == 1) return -1;                         // STDOUT(쓰기 전용)
+  
+//   // 5. 표준 입력 읽기(STDIN)
+//   if(fd == 0){
+//     unsigned n = 0;
+//     uint8_t *dst = (uint8_t *)buffer;           // 유저가 준 버퍼를 “바이트 배열”처럼 다루기 위해 uint8_t*로 캐스팅  
+
+//     while(n < size) dst[n++] = input_getc();     // 한 글자씩 키보드에서 읽어와 버퍼에 채움
+//     return (int)n;                               // 읽은 바이트 수 반환
+//   }
+
+//   // 6. 일반 파일 읽기
+//   struct file *f = cur->fd_table[fd];          // 현재 스레드의 FD 테이블의 진짜 커널 파일 객체 포인터
+//   if(f == NULL) return -1;                     // 실패
+
+//   lock_acquire(&filesys_lock);
+//   int nread = file_read(f, buffer, size);     // 디스크에서 최대 size바이트를 읽어 유저 버퍼에 직접 씀
+//   lock_release(&filesys_lock);
+
+//   return nread;                               // 사용자에게 읽은 바이트 수 돌려줌
+// }
 
 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
@@ -200,17 +274,31 @@ void syscall_handler (struct intr_frame *f) {
 
     
     case SYS_CREATE: {
-      const char *ufile = (const char *)f->R.rdi;      // RDI → 첫 번째 인자(filename 포인터)
-      unsigned size = (unsigned)f->R.rsi;              // RSI → 두 번째 인자(size)
+      const char *ufile = (const char *)f->R.rdi;      // RDI: 1번째 인자 → filename 포인터
+      unsigned size = (unsigned)f->R.rsi;              // RSI: 2번째 인자 → size
       f->R.rax = (uint64_t)sys_create(ufile, size);
       break;
     }
 
     case SYS_OPEN: {
-      const char *ufile = (const char *)f->R.rdi;      // RDI → 첫 번째 인자(filename 포인터)
-      f->R.rax = (uint64_t)sys_open(ufile);
+      const char *ufile = (const char *)f->R.rdi;      // RDI: 1번째 인자 → fd
+      f->R.rax = (int)sys_open(ufile);
       break;
     }
+
+    case SYS_CLOSE: {
+      int fd = (int)f->R.rdi;      // RDI → 첫 번째 인자(filename 포인터)
+      sys_close(fd);
+      break;
+    }
+
+    // case SYS_READ: {
+    //   int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
+    //   void *buffer = (void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
+    //   unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
+    //   f->R.rax = (uint64_t)sys_read(fd, buffer, size);    // 리턴값을 RAX에 실어줌
+    //   break;
+    // }
 
     default:
       sys_exit(-1);      // 모르는 시스템콜 번호면 "프로세스 종료(-1)"로 처리

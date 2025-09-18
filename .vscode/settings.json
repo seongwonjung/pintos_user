@@ -26,7 +26,9 @@
         "interrupt.h": "c",
         "malloc.h": "c",
         "palloc.h": "c",
-        "file.h": "c"
+        "file.h": "c",
+        "syscall.h": "c",
+        "input.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

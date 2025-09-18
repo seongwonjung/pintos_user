@@ -533,7 +533,7 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   t->exit_status = -1;
   t->running_file = NULL;
 
-  // ⓞ FD 테이블 초기화
+  // 🅾 FD 테이블 초기화
   for(int i=0; i < FD_MAX; i++){
     t ->fd_table[i] = NULL;          // NULL로 시작
     t->fd_next = FD_MIN;             // 첫 FD는 2부터

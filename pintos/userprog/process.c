@@ -18,6 +18,7 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"        
 #include "threads/malloc.h"    // 🚧 malloc (작은 구조체: struct child, struct start_info)
+#include "userprog/syscall.h"   // 
 #include "intrinsic.h"
 
 
@@ -340,9 +341,13 @@ void process_exit (void) {
         curr->as_child->exited = true;                        // 상태 플래그(참고용)
         sema_up(&curr->as_child->wait_sema);                  // 시그널 보내기: 부모가 sema_down()에서 기다리는 걸 깨움
     }
-    // 🚧
-
-	process_cleanup ();                        //정리
+    
+    // 🆂 FD테이블 일괄 정리
+	for (int fd = FD_MIN; fd < FD_MAX; fd++){
+		if(curr->fd_table[fd]) sys_close(fd);
+	}
+	    
+	process_cleanup ();                        // 정리
 }
 
 /* Free the current process's resources. */

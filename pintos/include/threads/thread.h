@@ -127,7 +127,7 @@ struct thread {
   // 🚧 실행 파일(rox-*) 
   struct file *running_file; // 실행 중인 ELF 파일 핸들(실행 중 write 금지/해제 위해 보관)
 
-  // ⓞ 스레드(=프로세스)별 FD 테이블
+  // 🅾 스레드(=프로세스)별 FD 테이블
   struct file *fd_table[FD_MAX];   // FD번호 → 파일객체 매핑
   int fd_next;                     // 다음 탐색 시작 위치   
 
