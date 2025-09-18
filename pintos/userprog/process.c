@@ -3,7 +3,8 @@
 #include <inttypes.h>
 #include <round.h>
 #include <stdio.h>
-#include <stdlib.h>
+// #include <stdlib.h>
+#include "threads/malloc.h"
 #include <string.h>
 #include "userprog/gdt.h"
 #include "userprog/tss.h"
@@ -26,6 +27,8 @@ static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+struct child *find_child(struct list *children, tid_t tid);
+
 
 /* General process initializer for initd and other process. */
 static void
@@ -200,27 +203,69 @@ process_exec (void *f_name) {
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) {
-	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
-	 * XXX:       to add infinite loop here before
-	 * XXX:       implementing the process_wait. */
-  while (1) {
+process_wait (tid_t child_tid) {
+  struct thread *cur = thread_current();
+  struct child *ch = find_child(&cur->children, child_tid);
+  if (ch == NULL)              // 내 자식이 아님 or 존재 X
+    return -1;
+  if (ch->waited)              // 이미 wait 한 적 있음
+    return -1;
 
+  ch->waited = true;
+
+  // 자식이 아직 안 끝났으면 종료까지 블록
+  if (!ch->exited)
+    sema_down(&ch->sema);
+
+  // 종료코드 회수
+  int status = ch->exit_status;
+
+  // 부모의 children 리스트에서 제거 후 해제
+  list_remove(&ch->elem);                   // ch를 malloc으로 만들었다고 가정 (palloc이면 palloc_free_page로 변경)
+  free(ch);
+  return status;
+}
+
+struct child *find_child(struct list *children, tid_t tid) {
+  for (struct list_elem *e = list_begin(children);
+       e != list_end(children); e = list_next(e)) {
+    struct child *c = list_entry(e, struct child, elem);
+    if (c->tid == tid) return c;
   }
-  
-	return -1;
+  return NULL;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
 void
 process_exit (void) {
-	struct thread *curr = thread_current ();
-	/* TODO: Your code goes here.
-	 * TODO: Implement process termination message (see
-	 * TODO: project2/process_termination.html).
-	 * TODO: We recommend you to implement process resource cleanup here. */
+  struct thread *curr = thread_current ();
 
-	process_cleanup ();
+  /* 1) 요구사항: 종료 메시지 출력 */
+  /*   형식: "<프로세스이름>: exit(<코드>)" */
+  printf("%s: exit(%d)\n", curr->name, curr->exit_status);
+
+  /* 2) 부모에게 종료 상태 전달 및 깨우기 */
+  if (curr->parent != NULL) {
+    struct child *ch = find_child(&curr->parent->children, curr->tid);
+    if (ch != NULL) {
+      ch->exit_status = curr->exit_status;
+      ch->exited = true;
+      /* 부모가 wait 중일 수 있으니 세마포어 올려서 깨움 */
+      sema_up(&ch->sema);
+    }
+  }
+
+  /* (선택) 실행 파일/FD 정리는 각자 구현 상황에 따라 여기서 처리하면 됨.
+     예: 실행 파일 쓰기 허용/닫기, 열린 파일들 닫기 등.
+     - curr->running_file 가 있다면:
+         file_allow_write(curr->running_file);
+         file_close(curr->running_file);
+         curr->running_file = NULL;
+     - FD 테이블이 있다면 여기서 순회하며 file_close(...)
+  */
+
+  /* 3) 프로세스 주소공간/자원 정리 */
+  process_cleanup ();
 }
 
 /* Free the current process's resources. */
@@ -433,12 +478,12 @@ load (const char *file_name, struct intr_frame *if_) {
   argument_passing(file_name, if_);
 
   size_t dump_len = 128;
-  hex_dump((size_t) if_->rsp, (const void *) if_->rsp, dump_len, true);
+  // hex_dump((size_t) if_->rsp, (const void *) if_->rsp, dump_len, true);
 
 	success = true;
-
 done:
 	/* We arrive here whether the load is successful or not. */
+  if (copy) palloc_free_page(copy);
 	file_close (file);
 	return success;
 }
@@ -446,68 +491,76 @@ done:
 // 커멘드라인을 파싱한 후에 유저스택에 저장, 레지스터에 반영
 static void
 argument_passing (const char *cmdline, struct intr_frame *if_) {
-  /* cmdline 토큰화용 임시 버퍼(지역 수명) */
-  char *buf = palloc_get_page(PAL_ZERO);
-  ASSERT(buf != NULL);
-  strlcpy(buf, cmdline, PGSIZE);
-
-  /* ---- (아래 네 변수는 전부 ‘지역’) ---- */
-  char *argv[64];          // 임시 포인터 배열
-  void *arg_addrs[64];     // 유저스택에 복사된 문자열들의 주소(임시 저장)
-  int argc = 0;
-  char *save_ptr = NULL;
-
-  for (char *tok = strtok_r(buf, " ", &save_ptr);
-       tok != NULL;
-       tok = strtok_r(NULL, " ", &save_ptr)) {
-    argv[argc++] = tok;
-    // (경계 체크: argc >= 64면 오류 처리)
-  }
-
-  /* 유저 스택 포인터 가져오기 */
-  uint8_t *rsp = (uint8_t *) if_->rsp;
-
-  /* 1) 문자열(토큰) 바이트들을 역순으로 유저스택에 복사 */
-  for (int i = argc - 1; i >= 0; --i) {
-    size_t len = strlen(argv[i]) + 1;  // 널 포함
-    rsp -= len;
-    memcpy(rsp, argv[i], len);
-    arg_addrs[i] = (void *) rsp;       // “유저스택 내” 문자열 시작 주소
-  }
-
-  /* 2) 정렬(8B) */
-  while ((uintptr_t)rsp % 8 != 0) *--rsp = 0;
-
-  /* 3) NULL 센티넬 */
-  rsp -= sizeof(char *);
-  *(char **)rsp = NULL;
-
-  /* 4) argv[i] 포인터들(= 위에서 저장한 유저 주소) 푸시
-        ↓ 이 루프가 끝나면 rsp가 argv[0]이 놓인 위치를 가리킴 */
-  for (int i = argc - 1; i >= 0; --i) {
+    /* 1) 원본 보존용 버퍼 */
+    char *page = palloc_get_page(PAL_ZERO);
+    ASSERT(page != NULL);
+    strlcpy(page, cmdline, PGSIZE);
+    
+    /* 2) 토큰화 */
+    char *argv_tok[MAX_ARGU];
+    int argc = 0;
+    char *save_ptr = NULL;
+    for (char *tok = strtok_r(page, " ", &save_ptr);
+         tok != NULL && argc < MAX_ARGU;
+         tok = strtok_r(NULL, " ", &save_ptr)) {
+        argv_tok[argc++] = tok;
+    }
+    
+    if (argc == 0) {
+        palloc_free_page(page);
+        return;
+    }
+    
+    /* 3) 유저 스택에 문자열 복사(역순) */
+    uint8_t *rsp = (uint8_t *) if_->rsp;
+    uint8_t *stack_bottom = (uint8_t *)(USER_STACK - PGSIZE);
+    void *arg_addr[MAX_ARGU];
+    
+    for (int i = argc - 1; i >= 0; --i) {
+        size_t len = strlen(argv_tok[i]) + 1;
+        rsp -= len;
+        if (rsp < stack_bottom) {  // 경계 검사 추가
+            palloc_free_page(page);
+            PANIC("Stack overflow in argument_passing");
+        }
+        memcpy(rsp, argv_tok[i], len);
+        arg_addr[i] = (void *)rsp;
+    }
+    
+    /* 4) 정렬(8바이트) */
+    while ((uintptr_t)rsp % 8 != 0) {
+        if (rsp <= stack_bottom) {
+            palloc_free_page(page);
+            PANIC("Stack overflow during alignment");
+        }
+        *--rsp = 0;
+    }
+    
+    /* 5) NULL 센티넬 */
     rsp -= sizeof(char *);
-    *(char **)rsp = (char *)arg_addrs[i];
-  }
-
-  /* 5) argv 배열의 시작 주소를 값으로 한 번 더 푸시 */
-  char **argv_ptr = (char **)rsp;   // 현재 rsp가 곧 argv[0]의 주소
-  rsp -= sizeof(char **);
-  *(char ***)rsp = argv_ptr;
-
-  /* 6) argc 푸시 */
-  rsp -= sizeof(int);
-  *(int *)rsp = argc;
-
-  /* 7) fake return (0) */
-  rsp -= sizeof(void *);
-  *(void **)rsp = 0;
-
-  /* 8) 레지스터 반영(밖에 남기는 “유일한 결과”) */
-  if_->R.rdi = argc;                 // 1st arg
-  if_->R.rsi = (uint64_t)argv_ptr;   // 2nd arg
-  if_->rsp  = (uint64_t)rsp;
-
-  palloc_free_page(buf);             // 지역 임시 버퍼 수명 종료
+    *(char **)rsp = NULL;
+    
+    /* 6) argv[i] 포인터들 푸시 (역순) */
+    for (int i = argc - 1; i >= 0; --i) {
+        rsp -= sizeof(char *);
+        *(char **)rsp = (char *)arg_addr[i];
+    }
+    
+    /* 7) argv 시작 주소 저장 (레지스터용) */
+    char **argv_start = (char **)rsp;  // 현재 rsp가 argv[0] 위치
+    
+    /* 8) argc, fake return 푸시 */
+    rsp -= sizeof(int);
+    *(int *)rsp = argc;
+    rsp -= sizeof(void *);
+    *(void **)rsp = 0;  // fake return
+    
+    /* 9) 레지스터 갱신 */
+    if_->R.rdi = argc;
+    if_->R.rsi = (uint64_t)argv_start;  // 수정된 부분
+    if_->rsp = (uint64_t)rsp;
+    
+    palloc_free_page(page);
 }
 
 /* Checks whether PHDR describes a valid, loadable segment in
