@@ -17,9 +17,11 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/gdt.h"
+#include "userprog/process.h"
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
+static void sys_read(struct intr_frame *f);
 static void sys_write(struct intr_frame *f);
 static void sys_exit(struct intr_frame *f);
 static void sys_exit_with_error(struct intr_frame *f);
@@ -133,7 +135,9 @@ void fd_close(struct thread *t, int fd) {
   struct file *f = t->fd_table[fd];
   t->fd_table[fd] = NULL;
   t->next_fd = fd;
+  lock_acquire(&filesys_lock);
   file_close(f);
+  lock_release(&filesys_lock);
 }
 
 /* 사용자 주소 addr이 유효한지(NULL이 아니고, 사용자 영역에 있으며,
@@ -166,7 +170,7 @@ static const syscall_handler_t syscall_tbl[] = {
     [SYS_REMOVE] = NULL,
     [SYS_OPEN] = sys_open,
     [SYS_FILESIZE] = sys_filesize,
-    [SYS_READ] = NULL,
+    [SYS_READ] = sys_read,
     [SYS_WRITE] = sys_write,
     [SYS_SEEK] = NULL,
     [SYS_TELL] = NULL,
@@ -206,6 +210,37 @@ static void sys_exit(struct intr_frame *f) {
 }
 
 static void sys_halt(struct intr_frame *f) { power_off(); }
+
+static void sys_read(struct intr_frame *f) {
+  int fd = (int)f->R.rdi;
+  // bad-fd 검사
+  if (fd < 0 || fd > FD_MAX) return;
+  // fd == 1 -> stdout
+  if (fd == 1) return;
+
+  const void *buf = (const void *)f->R.rsi;
+  unsigned size = (unsigned)f->R.rdx;
+  // 유효 주소인지 확인
+  if (!validate_user_addr(buf)) {
+    sys_exit_with_error(f);
+    return;
+  }
+
+  if (fd == 0) {  // fd == 0 -> stdin
+    input_getc();
+  } else {  // 다른 열린 파일일때
+    struct file *file = thread_current()->fd_table[fd];
+    if (!file) {
+      f->R.rax = -1;
+      return;
+    }
+    lock_acquire(&filesys_lock);
+    size = file_read(file, buf, size);
+    lock_release(&filesys_lock);
+  }
+  f->R.rax = size;
+  return;
+}
 
 static void sys_write(struct intr_frame *f) {
   int fd = (int)f->R.rdi;
@@ -336,7 +371,14 @@ static void sys_close(struct intr_frame *f) {
     return;
   }
 
-  lock_acquire(&filesys_lock);
   fd_close(cur, fd);
-  lock_release(&filesys_lock);
+}
+
+static void sys_fork(struct intr_frame *f) {
+  const char *thread_name = f->R.rdi;
+  if (!validate_user_addr(thread_name)) {
+    sys_exit_with_error(f);
+    return;
+  }
+  tid_t child_pid = process_fork(thread_name, f);
 }
