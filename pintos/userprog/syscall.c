@@ -26,6 +26,7 @@
 // 🆁
 #include "devices/input.h"   // input_getc()      (stdin(0) 읽을 때 키보드에서 한 바이트씩 가져오려면)
 #include <stdint.h>          // uintptr_t
+#include "filesys/file.h"  // file_length(), file_tell()
 
 
 void syscall_entry (void);
@@ -95,13 +96,15 @@ static int fd_install(struct thread *t, struct file *f){
     if(t->fd_table[fd] == NULL){          // NULL이면 아직 아무 파일도 안 꽂혀 있음 → 사용 가능한 슬롯
       t->fd_table[fd] = f;
       // t->fd_next = fd + 1;
-    if(t->fd_next >= FD_MAX) t->fd_next = FD_MIN;      // 예외 처리(랩어라운드)  
+    // if(t->fd_next >= FD_MAX) t->fd_next = FD_MIN;      // 예외 처리(랩어라운드)  
     
     return fd;         // 성공 -> fd번호 반환
     } 
   }
   return -1;            // 실패
 }
+
+
 
 
 void syscall_init (void) {
@@ -115,7 +118,7 @@ void syscall_init (void) {
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
 
-  lock_init(&filesys_lock);       // ★ CREATE: 파일시스템 락 초기화
+  lock_init(&filesys_lock);       // 🅲 파일시스템 락 초기화
   
 }
 
@@ -207,58 +210,82 @@ void sys_close(int fd){
   lock_release(&filesys_lock);
 }
 
+
+int filesize(int fd){
+    if(fd < 0 || fd >= FD_MAX){
+        return -1;
+    }
+    struct thread *t = thread_current();
+    struct file *target_file = t->fd_table[fd];
+    if(target_file == NULL){
+        return -1;
+    }
+    lock_acquire(&filesys_lock);
+    int size = file_length(target_file);
+    lock_release(&filesys_lock);
+    return size;
+}
+
 // 🆁 READ
-// static int sys_read(int fd, void *buffer, unsigned size){
+static int sys_read(int fd, void *buffer, unsigned size){
+  struct thread *cur = thread_current();
+
+  // 1. 예외 처리
+  if(size == 0) return 0;                     // 0바이트 -> 검사 필요X (즉시 통과)
+                        
+  if (fd < FD_MIN || fd >= FD_MAX) return -1;      // FD 범위 (실패)
+  if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
+  
+  // 2. 표준 입출력
+  if(fd == 1) return -1;                          // STDOUT(쓰기 전용)
+  
+  // STDOUT(읽기)
+  else if(fd == 0){                         
+     unsigned i = 0;
+     for (; i < size; i++)                           
+       ((uint8_t *)buffer)[i] = input_getc();     // 한 글자씩 키보드에서 읽어와 버퍼에 채움  
+     return (int)i;                               // 읽은 바이트 수 반환
+  }
+  // 3. 일반 파일
+  else{
+    struct file *f = cur->fd_table[fd];
+    if (!f) return -1;                               // 미할당 FD
+
+    lock_acquire(&filesys_lock);
+    int nread = file_read(f, buffer, size);
+    lock_release(&filesys_lock);
+    return nread;
+  }
+}
+
+// static int sys_write(int fd, const void *buffer, unsigned size){
 //   struct thread *cur = thread_current();
 
-//   // 1. 유저 인자 검증
-//   if(size == 0) return 0;                     // 0바이트 -> 검사 필요X (즉시 통과)
-//   if (buffer == NULL) sys_exit(-1);          // 예외처리(NULL)
-
-//   // 2. 유저 버퍼 범위 검증
-//   // 정수형으로 캐스팅(포인터 산술 위해)
-//   uintptr_t start = (uintptr_t)buffer;           
-//   uintptr_t end = start + (uintptr_t)size - 1;
+//   // 1. 예외 처리
+//   if(size == 0) return 0;                           // 0바이트 -> 검사 필요X (즉시 통과)
+//   if (fd < FD_MIN || fd >= FD_MAX) return -1;      // FD 범위 (실패)
+//   if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
   
-//   if(end < start) sys_exit(-1);                   // 예외처리(오버플로우)
-
-//   if (!is_user_vaddr((void*)start) || !is_user_vaddr((void*)end)) sys_exit(-1);     // 예외처리(유저 가상 주소)
-
-//   // 3. 페이지 단위 매핑 검증
-//   // 페이지 경계에 맞춰 내림 (페이지 단위로 훑기 위해)
-//   uintptr_t p = (uintptr_t)pg_round_down((void*)start);        // 첫 페이지의 시작 주소
-//   uintptr_t last = (uintptr_t)pg_round_down((void*)end);       // 마지막 페이지의 시작 주소
-
-//   // 페이지 단위로 전 구간 매핑 확인
-//   for(; ; p += PGSIZE){
-//     if(pml4_get_page(cur->pml4, (void*)p) == NULL) sys_exit(-1);
-
-//     if(p == last) break;    // 마지막 페이지 -> 종료
-//   }
+//   // 2. 표준
+//   if(fd == 0) return -1;                          // STDOUT(읽기)
   
-  
-//   if(fd == 1) return -1;                         // STDOUT(쓰기 전용)
-  
-//   // 5. 표준 입력 읽기(STDIN)
-//   if(fd == 0){
-//     unsigned n = 0;
-//     uint8_t *dst = (uint8_t *)buffer;           // 유저가 준 버퍼를 “바이트 배열”처럼 다루기 위해 uint8_t*로 캐스팅  
-
-//     while(n < size) dst[n++] = input_getc();     // 한 글자씩 키보드에서 읽어와 버퍼에 채움
-//     return (int)n;                               // 읽은 바이트 수 반환
+//   // STDOUT(쓰기 전용) 
+//   else if(fd == 1){                         
+//     putbuf((const char *)buffer, (size_t)size);
+//     return (int)size;
 //   }
 
-//   // 6. 일반 파일 읽기
-//   struct file *f = cur->fd_table[fd];          // 현재 스레드의 FD 테이블의 진짜 커널 파일 객체 포인터
-//   if(f == NULL) return -1;                     // 실패
+//   // 일반 파일
+//   else{
+//     struct file *f = cur->fd_table[fd];
+//     if (!f) return -1;                               // 미할당 FD
 
-//   lock_acquire(&filesys_lock);
-//   int nread = file_read(f, buffer, size);     // 디스크에서 최대 size바이트를 읽어 유저 버퍼에 직접 씀
-//   lock_release(&filesys_lock);
-
-//   return nread;                               // 사용자에게 읽은 바이트 수 돌려줌
+//     lock_acquire(&filesys_lock);
+//     int nwrite = file_write(f, buffer, size);
+//     lock_release(&filesys_lock);
+//     return nwrite;
+//   }
 // }
-
 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
 void syscall_handler (struct intr_frame *f) {
@@ -292,13 +319,26 @@ void syscall_handler (struct intr_frame *f) {
       break;
     }
 
-    // case SYS_READ: {
+    case SYS_READ: {
+      int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
+      void *buffer = (void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
+      unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
+      f->R.rax = (int)sys_read(fd, buffer, size);    // 리턴값을 RAX에 실어줌
+      break;
+    }
+
+    case SYS_FILESIZE:
+      f->R.rax = filesize(f->R.rdi);
+      break;
+
+    // case SYS_WRITE: {
     //   int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
-    //   void *buffer = (void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
+    //   void *buffer = (const void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
     //   unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
-    //   f->R.rax = (uint64_t)sys_read(fd, buffer, size);    // 리턴값을 RAX에 실어줌
+    //   f->R.rax = (int)sys_write(fd, buffer, size);    // 리턴값을 RAX에 실어줌
     //   break;
     // }
+
 
     default:
       sys_exit(-1);      // 모르는 시스템콜 번호면 "프로세스 종료(-1)"로 처리

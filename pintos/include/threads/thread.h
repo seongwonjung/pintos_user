@@ -40,7 +40,7 @@ typedef int tid_t;
 
 // ⓞ FD 범위(표준: 0=stdin, 1=stdout는 예약, 실제 파일은 2부터)
 #define FD_MIN 2            // 0,1은 표준입출력 예약
-#define FD_MAX 128
+#define FD_MAX 64
 
 /* A kernel thread or user process.
  *
