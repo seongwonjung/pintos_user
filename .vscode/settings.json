@@ -18,7 +18,13 @@
         "flags.h": "c",
         "fixed-point.h": "c",
         "tests.h": "c",
-        "inttypes.h": "c"
+        "inttypes.h": "c",
+        "malloc.h": "c",
+        "process.h": "c",
+        "string": "c",
+        "string_view": "c",
+        "chrono": "c",
+        "*.inc": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
