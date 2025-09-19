@@ -33,6 +33,7 @@ struct child *find_child(struct list *children, tid_t tid);
 /* General process initializer for initd and other process. */
 static void
 process_init (void) {
+
 	struct thread *current = thread_current ();
 }
 
@@ -45,6 +46,9 @@ tid_t
 process_create_initd (const char *file_name) {
 	char *fn_copy;
 	tid_t tid;
+  char *save_ptr = NULL;
+  char *prog_name;
+  char *copy_file = palloc_get_page(PAL_ZERO);
 
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
@@ -52,9 +56,15 @@ process_create_initd (const char *file_name) {
 	if (fn_copy == NULL)
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
+  
+    /* 1) program_name만 뽑기 위한 복사본 */
+  if (copy_file == NULL) return false;
+  strlcpy(copy_file, file_name, PGSIZE);
+
+  prog_name = strtok_r(copy_file, " ", &save_ptr);
 
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (prog_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;

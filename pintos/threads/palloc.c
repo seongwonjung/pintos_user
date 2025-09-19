@@ -39,7 +39,7 @@ static struct pool kernel_pool, user_pool;
 /* Maximum number of pages to put in user pool. */
 size_t user_page_limit = SIZE_MAX;
 static void
-init_pool (struct pool *p, void **bm_base, uint8_t start, uint8_t end);
+init_pool (struct pool *p, void **bm_base, uint64_t start, uint64_t end);
 
 static bool page_from_pool (const struct pool *, void *page);
 
@@ -65,9 +65,9 @@ struct e820_entry {
 
 /* Represent the range information of the ext_mem/base_mem */
 struct area {
-	uint8_t start;
-	uint8_t end;
-	uint8_t size;
+	uint64_t start;
+	uint64_t end;
+	uint64_t size;
 };
 
 #define BASE_MEM_THRESHOLD 0x100000
@@ -85,9 +85,9 @@ resolve_area_info (struct area *base_mem, struct area *ext_mem) {
 	for (i = 0; i < mb_info->mmap_len / sizeof (struct e820_entry); i++) {
 		struct e820_entry *entry = &entries[i];
 		if (entry->type == ACPI_RECLAIMABLE || entry->type == USABLE) {
-			uint8_t start = APPEND_HILO (entry->mem_hi, entry->mem_lo);
-			uint8_t size = APPEND_HILO (entry->len_hi, entry->len_lo);
-			uint8_t end = start + size;
+			uint64_t start = APPEND_HILO (entry->mem_hi, entry->mem_lo);
+			uint64_t size = APPEND_HILO (entry->len_hi, entry->len_lo);
+			uint64_t end = start + size;
 			printf("%llx ~ %llx %d\n", start, end, entry->type);
 
 			struct area *area = start < BASE_MEM_THRESHOLD ? base_mem : ext_mem;
@@ -124,15 +124,15 @@ populate_pools (struct area *base_mem, struct area *ext_mem) {
 	extern char _end;
 	void *free_start = pg_round_up (&_end);
 
-	uint8_t total_pages = (base_mem->size + ext_mem->size) / PGSIZE;
-	uint8_t user_pages = total_pages / 2 > user_page_limit ?
+	uint64_t total_pages = (base_mem->size + ext_mem->size) / PGSIZE;
+	uint64_t user_pages = total_pages / 2 > user_page_limit ?
 		user_page_limit : total_pages / 2;
-	uint8_t kern_pages = total_pages - user_pages;
+	uint64_t kern_pages = total_pages - user_pages;
 
 	// Parse E820 map to claim the memory region for each pool.
 	enum { KERN_START, KERN, USER_START, USER } state = KERN_START;
-	uint8_t rem = kern_pages;
-	uint8_t region_start = 0, end = 0, start, size, size_in_pg;
+	uint64_t rem = kern_pages;
+	uint64_t region_start = 0, end = 0, start, size, size_in_pg;
 
 	struct multiboot_info *mb_info = ptov (MULTIBOOT_INFO);
 	struct e820_entry *entries = ptov (mb_info->mmap_base);
@@ -141,7 +141,7 @@ populate_pools (struct area *base_mem, struct area *ext_mem) {
 	for (i = 0; i < mb_info->mmap_len / sizeof (struct e820_entry); i++) {
 		struct e820_entry *entry = &entries[i];
 		if (entry->type == ACPI_RECLAIMABLE || entry->type == USABLE) {
-			start = (uint8_t) ptov (APPEND_HILO (entry->mem_hi, entry->mem_lo));
+			start = (uint64_t) ptov (APPEND_HILO (entry->mem_hi, entry->mem_lo));
 			size = APPEND_HILO (entry->len_hi, entry->len_lo);
 			end = start + size;
 			size_in_pg = size / PGSIZE;
@@ -191,7 +191,7 @@ populate_pools (struct area *base_mem, struct area *ext_mem) {
 	init_pool(&user_pool, &free_start, region_start, end);
 
 	// Iterate over the e820_entry. Setup the usable.
-	uint8_t usable_bound = (uint8_t) free_start;
+	uint64_t usable_bound = (uint64_t) free_start;
 	struct pool *pool;
 	void *pool_end;
 	size_t page_idx, page_cnt;
@@ -199,17 +199,17 @@ populate_pools (struct area *base_mem, struct area *ext_mem) {
 	for (i = 0; i < mb_info->mmap_len / sizeof (struct e820_entry); i++) {
 		struct e820_entry *entry = &entries[i];
 		if (entry->type == ACPI_RECLAIMABLE || entry->type == USABLE) {
-			uint8_t start = (uint8_t)
+			uint64_t start = (uint64_t)
 				ptov (APPEND_HILO (entry->mem_hi, entry->mem_lo));
-			uint8_t size = APPEND_HILO (entry->len_hi, entry->len_lo);
-			uint8_t end = start + size;
+			uint64_t size = APPEND_HILO (entry->len_hi, entry->len_lo);
+			uint64_t end = start + size;
 
 			// TODO: add 0x1000 ~ 0x200000, This is not a matter for now.
 			// All the pages are unuable
 			if (end < usable_bound)
 				continue;
 
-			start = (uint8_t)
+			start = (uint64_t)
 				pg_round_up (start >= usable_bound ? start : usable_bound);
 split:
 			if (page_from_pool (&kernel_pool, (void *) start))
@@ -221,13 +221,13 @@ split:
 
 			pool_end = pool->base + bitmap_size (pool->used_map) * PGSIZE;
 			page_idx = pg_no (start) - pg_no (pool->base);
-			if ((uint8_t) pool_end < end) {
-				page_cnt = ((uint8_t) pool_end - start) / PGSIZE;
+			if ((uint64_t) pool_end < end) {
+				page_cnt = ((uint64_t) pool_end - start) / PGSIZE;
 				bitmap_set_multiple (pool->used_map, page_idx, page_cnt, false);
-				start = (uint8_t) pool_end;
+				start = (uint64_t) pool_end;
 				goto split;
 			} else {
-				page_cnt = ((uint8_t) end - start) / PGSIZE;
+				page_cnt = ((uint64_t) end - start) / PGSIZE;
 				bitmap_set_multiple (pool->used_map, page_idx, page_cnt, false);
 			}
 		}
@@ -235,7 +235,7 @@ split:
 }
 
 /* Initializes the page allocator and get the memory size */
-uint8_t
+uint64_t
 palloc_init (void) {
   /* End of the kernel as recorded by the linker.
      See kernel.lds.S. */
@@ -330,11 +330,11 @@ palloc_free_page (void *page) {
 
 /* Initializes pool P as starting at START and ending at END */
 static void
-init_pool (struct pool *p, void **bm_base, uint8_t start, uint8_t end) {
+init_pool (struct pool *p, void **bm_base, uint64_t start, uint64_t end) {
   /* We'll put the pool's used_map at its base.
      Calculate the space needed for the bitmap
      and subtract it from the pool's size. */
-	uint8_t pgcnt = (end - start) / PGSIZE;
+	uint64_t pgcnt = (end - start) / PGSIZE;
 	size_t bm_pages = DIV_ROUND_UP (bitmap_buf_size (pgcnt), PGSIZE) * PGSIZE;
 
 	lock_init(&p->lock);

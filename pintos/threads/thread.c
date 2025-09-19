@@ -13,6 +13,7 @@
 #include "intrinsic.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "threads/malloc.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -142,7 +143,7 @@ void thread_donate_chain(struct thread *donor) {
 // Global descriptor table for the thread_start.
 // Because the gdt will be setup after the thread_init, we should
 // setup temporal gdt first.
-static uint8_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
+static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -169,7 +170,7 @@ thread_init (void) {
 	 * The kernel will rebuild the gdt with user context, in gdt_init (). */
 	struct desc_ptr gdt_ds = {
 		.size = sizeof (gdt) - 1,
-		.address = (uint8_t) gdt
+		.address = (uint64_t) gdt
 	};
 	lgdt (&gdt_ds);
 
@@ -247,8 +248,7 @@ thread_print_stats (void) {
 
 // 2️⃣
 tid_t
-thread_create (const char *name, int priority,
-		thread_func *function, void *aux) {
+thread_create (const char *name, int priority, thread_func *function, void *aux) {
 	struct thread *t;
 	tid_t tid;
 
@@ -266,17 +266,38 @@ thread_create (const char *name, int priority,
 	/* Call the kernel_thread if it scheduled.
 	 * Note) rdi is 1st argument, and rsi is 2nd argument. */
 	t->tf.rip = (uintptr_t) kernel_thread;
-	t->tf.R.rdi = (uint8_t) function;
-	t->tf.R.rsi = (uint8_t) aux;
+	t->tf.R.rdi = (uint64_t) function;
+	t->tf.R.rsi = (uint64_t) aux;
 	t->tf.ds = SEL_KDSEG;
 	t->tf.es = SEL_KDSEG;
 	t->tf.ss = SEL_KDSEG;
 	t->tf.cs = SEL_KCSEG;
 	t->tf.eflags = FLAG_IF;
 
+	#ifdef USERPROG
+
+		// 부모-자식 관계 기록용 child 노드 생성 (ready 큐 넣기 전에!)
+		// 🔒 간단히 인터럽트 잠깐 끄고 원자적으로 children에 추가
+		enum intr_level old = intr_disable();
+		struct thread *parent = thread_current();
+		if (parent) {
+			struct child *ch = malloc(sizeof *ch);
+			ASSERT(ch != NULL);
+			ch->tid = tid;
+			ch->exit_status = -1;
+			ch->exited = false;
+			ch->waited = false;
+			sema_init(&ch->sema, 0);
+			list_push_back(&parent->children, &ch->elem);
+		}
+		intr_set_level(old);
+	#endif
+
 	/* Add to run queue. */
 	thread_unblock (t);
 	if (t->priority > thread_current()->priority)   thread_yield();       // 2️⃣ 더 높은 애가 생기면 바로 양보(선점)
+
+	t->parent = thread_current();
 
 	return tid;
 }
@@ -525,7 +546,7 @@ static void init_thread (struct thread *t, const char *name, int priority) {
 	memset (t, 0, sizeof *t);
 	t->status = THREAD_BLOCKED;
 	strlcpy (t->name, name, sizeof t->name);
-	t->tf.rsp = (uint8_t) t + PGSIZE - sizeof (void *);
+	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	
 	t->priority = priority;                 // 유효 우선순위
 	t->base_priority = priority;            // 3️⃣ 원래 우선순위 저장(One)  => 복원 기준
@@ -533,6 +554,16 @@ static void init_thread (struct thread *t, const char *name, int priority) {
     t->waiting_lock = NULL;                 // 3️⃣ 현재 기다리는 락X(muti)
 	
 	t->magic = THREAD_MAGIC;
+
+	t->parent = NULL;
+	list_init(&t->children);
+
+	#ifdef USERPROG
+	// fd 리스트 초기화
+	list_init(&t->fds);
+	list_init(&t->free_fds);
+	t->next_fd = 2;   // 0=stdin, 1=stdout 예약
+	#endif
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -573,7 +604,7 @@ do_iret (struct intr_frame *tf) {
 			"movw (%%rsp),%%es\n"
 			"addq $32, %%rsp\n"
 			"iretq"
-			: : "g" ((uint8_t) tf) : "memory");
+			: : "g" ((uint64_t) tf) : "memory");
 }
 
 /* Switching the thread by activating the new thread's page
@@ -588,8 +619,8 @@ do_iret (struct intr_frame *tf) {
    added at the end of the function. */
 static void
 thread_launch (struct thread *th) {
-	uint8_t tf_cur = (uint8_t) &running_thread ()->tf;
-	uint8_t tf = (uint8_t) &th->tf;
+	uint64_t tf_cur = (uint64_t) &running_thread ()->tf;
+	uint64_t tf = (uint64_t) &th->tf;
 	ASSERT (intr_get_level () == INTR_OFF);
 
 	/* The main switching logic.

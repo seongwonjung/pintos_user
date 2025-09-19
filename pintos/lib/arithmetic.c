@@ -23,7 +23,7 @@
    Traps with a divide error (#DE) if the quotient does not fit
    in 32 bits. */
 static inline uint32_t
-divl (uint8_t n, uint32_t d) {
+divl (uint64_t n, uint32_t d) {
 	uint32_t n1 = n >> 32;
 	uint32_t n0 = n;
 	uint32_t q, r;
@@ -68,8 +68,8 @@ nlz (uint32_t x) {
 
 /* Divides unsigned 64-bit N by unsigned 64-bit D and returns the
    quotient. */
-static uint8_t
-udiv64 (uint8_t n, uint8_t d) {
+static uint64_t
+udiv64 (uint64_t n, uint64_t d) {
 	if ((d >> 32) == 0) {
 		/* Proof of correctness:
 
@@ -95,7 +95,7 @@ udiv64 (uint8_t n, uint8_t d) {
 		   which is a tautology.
 
 		   Therefore, this code is correct and will not trap. */
-		uint8_t b = 1ULL << 32;
+		uint64_t b = 1ULL << 32;
 		uint32_t n1 = n >> 32;
 		uint32_t n0 = n;
 		uint32_t d0 = d;
@@ -109,7 +109,7 @@ udiv64 (uint8_t n, uint8_t d) {
 		else {
 			uint32_t d1 = d >> 32;
 			int s = nlz (d1);
-			uint8_t q = divl (n >> 1, (d << s) >> 32) >> (31 - s);
+			uint64_t q = divl (n >> 1, (d << s) >> 32) >> (31 - s);
 			return n - (q - 1) * d < d ? q - 1 : q;
 		}
 	}
@@ -118,7 +118,7 @@ udiv64 (uint8_t n, uint8_t d) {
 /* Divides unsigned 64-bit N by unsigned 64-bit D and returns the
    remainder. */
 static uint32_t
-umod64 (uint8_t n, uint8_t d) {
+umod64 (uint64_t n, uint64_t d) {
 	return n - d * udiv64 (n, d);
 }
 
@@ -126,9 +126,9 @@ umod64 (uint8_t n, uint8_t d) {
    quotient. */
 static int64_t
 sdiv64 (int64_t n, int64_t d) {
-	uint8_t n_abs = n >= 0 ? (uint8_t) n : -(uint8_t) n;
-	uint8_t d_abs = d >= 0 ? (uint8_t) d : -(uint8_t) d;
-	uint8_t q_abs = udiv64 (n_abs, d_abs);
+	uint64_t n_abs = n >= 0 ? (uint64_t) n : -(uint64_t) n;
+	uint64_t d_abs = d >= 0 ? (uint64_t) d : -(uint64_t) d;
+	uint64_t q_abs = udiv64 (n_abs, d_abs);
 	return (n < 0) == (d < 0) ? (int64_t) q_abs : -(int64_t) q_abs;
 }
 

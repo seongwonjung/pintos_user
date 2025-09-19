@@ -17,21 +17,21 @@ enum intr_level intr_disable (void);
 
 /* Interrupt stack frame. */
 struct gp_registers {
-	uint8_t r15;
-	uint8_t r14;
-	uint8_t r13;
-	uint8_t r12;
-	uint8_t r11;
-	uint8_t r10;
-	uint8_t r9;
-	uint8_t r8;
-	uint8_t rsi;
-	uint8_t rdi;
-	uint8_t rbp;
-	uint8_t rdx;
-	uint8_t rcx;
-	uint8_t rbx;
-	uint8_t rax;
+	uint64_t r15;
+	uint64_t r14;
+	uint64_t r13;
+	uint64_t r12;
+	uint64_t r11;
+	uint64_t r10;
+	uint64_t r9;
+	uint64_t r8;
+	uint64_t rsi;
+	uint64_t rdi;
+	uint64_t rbp;
+	uint64_t rdx;
+	uint64_t rcx;
+	uint64_t rbx;
+	uint64_t rax;
 } __attribute__((packed));
 
 struct intr_frame {
@@ -45,18 +45,18 @@ struct intr_frame {
 	uint16_t __pad3;
 	uint32_t __pad4;
 	/* Pushed by intrNN_stub in intr-stubs.S. */
-	uint8_t vec_no; /* Interrupt vector number. */
+	uint64_t vec_no; /* Interrupt vector number. */
 /* Sometimes pushed by the CPU,
    otherwise for consistency pushed as 0 by intrNN_stub.
    The CPU puts it just under `eip', but we move it here. */
-	uint8_t error_code;
+	uint64_t error_code;
 /* Pushed by the CPU.
    These are the interrupted task's saved registers. */
 	uintptr_t rip;
 	uint16_t cs;
 	uint16_t __pad5;
 	uint32_t __pad6;
-	uint8_t eflags;
+	uint64_t eflags;
 	uintptr_t rsp;
 	uint16_t ss;
 	uint16_t __pad7;

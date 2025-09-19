@@ -8,6 +8,10 @@
 #ifdef VM
 #include "vm/vm.h"
 #endif
+#ifdef USERPROG
+#include "lib/kernel/list.h"
+#include "filesys/file.h"
+#endif
 
 
 /* States in a thread's life cycle. */
@@ -27,6 +31,8 @@ typedef int tid_t;
 #define PRI_MIN 0                       /* Lowest priority. */
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
+#define FD_MAX 128
+#define FD_MIN 2
 
 /* A kernel thread or user process.
  *
@@ -85,6 +91,20 @@ typedef int tid_t;
  * only because they are mutually exclusive: only a thread in the
  * ready state is on the run queue, whereas only a thread in the
  * blocked state is on a semaphore wait list. */
+#ifdef USERPROG
+// 각각의 fd번호와 file을 한 덩어리로 묶어서 리스트로 관리
+struct fd_entry {
+  int fd;
+  struct file *file;
+  struct list_elem elem;   // thread.fds에 연결
+};
+// free된 fd번호를 관리 -> 재사용성
+struct fd_free {
+  int fd;
+  struct list_elem elem;   // thread.free_fds에 연결
+};
+
+#endif
 struct thread {
 	/* Owned by thread.c. */
 	tid_t tid;                          /* Thread identifier. */
@@ -94,18 +114,28 @@ struct thread {
 	int base_priority;                  // 3️⃣ Donation 해제 시 복원할 원래 우선순위(-one)
 	int64_t wakeup_tick;                // 1️⃣ 깨울 시각
 
+
 	// 3️⃣ donate-multiple
 	struct lock *waiting_lock;             // 지금 기다리는 락 (중첩 기부 전파용)
     struct list donations;                 // 나에게 기부한 스레드들
     struct list_elem donation_elem;        // 내가 남 donations에 들어갈 때 쓰는 elem 
-
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
+
 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
+	struct thread* parent;		   // 부모스레드
+	struct list   children;        // 내 자식들의 child 레코드 목록(부모가 가짐)
+	struct child *my_child_rec;    // 부모 쪽 리스트에 있는 '나'의 레코드
+	int           exit_status;     // 내 종료 코드
+	struct list fds;                // 열린 fd목록
+	struct list free_fds;           // 열린 fd목록
+	struct list_elem fd;
+	int next_fd;				   // 다음에 줄 fd(초기값 2)
 #endif
+
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
