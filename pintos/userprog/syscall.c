@@ -133,14 +133,6 @@ static void sys_exit (int status) {
   thread_exit();                                   // 커널 스레드 종료
 }
 
-// “쓰기(sys_write) 요청 들어오면 어디로 내보낼까?”
-static int sys_write (int fd, const void *buf, unsigned size) {
-  if (fd == 1) {                /* stdout */
-    if (buf && size) putbuf((const char *)buf, (size_t)size);
-    return (int)size;
-  }
-  return -1;
-}
 // 🚧
 
 // 🅲 CREATE: sys_create
@@ -210,7 +202,7 @@ void sys_close(int fd){
   lock_release(&filesys_lock);
 }
 
-
+// 🆁 🆆 헬퍼(파일 사이즈)
 int filesize(int fd){
     if(fd < 0 || fd >= FD_MAX){
         return -1;
@@ -233,13 +225,13 @@ static int sys_read(int fd, void *buffer, unsigned size){
   // 1. 예외 처리
   if(size == 0) return 0;                     // 0바이트 -> 검사 필요X (즉시 통과)
                         
-  if (fd < FD_MIN || fd >= FD_MAX) return -1;      // FD 범위 (실패)
+  if (fd < 0 || fd >= FD_MAX) return -1;      // FD 범위 (실패)
   if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
   
   // 2. 표준 입출력
-  if(fd == 1) return -1;                          // STDOUT(쓰기 전용)
+  if(fd == 1) return -1;                          // STDOUT(출력)
   
-  // STDOUT(읽기)
+  // STDIN(입력)
   else if(fd == 0){                         
      unsigned i = 0;
      for (; i < size; i++)                           
@@ -258,34 +250,37 @@ static int sys_read(int fd, void *buffer, unsigned size){
   }
 }
 
-// static int sys_write(int fd, const void *buffer, unsigned size){
-//   struct thread *cur = thread_current();
+// 🆆 WRITE
+static int sys_write(int fd, const void *buffer, unsigned size){
+  struct thread *cur = thread_current();
 
-//   // 1. 예외 처리
-//   if(size == 0) return 0;                           // 0바이트 -> 검사 필요X (즉시 통과)
-//   if (fd < FD_MIN || fd >= FD_MAX) return -1;      // FD 범위 (실패)
-//   if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
+  // 1. 예외 처리
+  if(size == 0) return 0;                            // 0바이트 -> 검사 필요X (즉시 통과)
+  if (fd < 0 || fd >= FD_MAX) return -1;             // FD 범위 (실패)
+  if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
   
-//   // 2. 표준
-//   if(fd == 0) return -1;                          // STDOUT(읽기)
+  // 2. 표준 입출력
+  if(fd == 0) return -1;                          // STDIN(입력)
   
-//   // STDOUT(쓰기 전용) 
-//   else if(fd == 1){                         
-//     putbuf((const char *)buffer, (size_t)size);
-//     return (int)size;
-//   }
+  // STDOUT(출력) 
+  else if(fd == 1){                         
+    putbuf((const char *)buffer, (size_t)size);
+    return (int)size;
+  }
 
-//   // 일반 파일
-//   else{
-//     struct file *f = cur->fd_table[fd];
-//     if (!f) return -1;                               // 미할당 FD
+  // 3. 일반 파일
+  else{
+    struct file *f = cur->fd_table[fd];
+    if (!f) return -1;                               // 미할당 FD
 
-//     lock_acquire(&filesys_lock);
-//     int nwrite = file_write(f, buffer, size);
-//     lock_release(&filesys_lock);
-//     return nwrite;
-//   }
-// }
+    lock_acquire(&filesys_lock);
+    int nwrite = file_write(f, buffer, size);
+    lock_release(&filesys_lock);
+    return nwrite;
+  }
+}
+
+
 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
 void syscall_handler (struct intr_frame *f) {
@@ -295,9 +290,9 @@ void syscall_handler (struct intr_frame *f) {
       sys_exit((int)f->R.rdi);                // 첫 번째 인자(RDI)를 int로 변환해서 sys_exit에 넘김
       break;
 
-    case SYS_WRITE:                    // rdi=fd, rsi=buf(유저 주소), rdx=size
-      f->R.rax = (uint64_t)sys_write((int)f->R.rdi, (const void *)f->R.rsi, (unsigned)f->R.rdx);
-      break;
+    // case SYS_WRITE:                    // rdi=fd, rsi=buf(유저 주소), rdx=size
+    //   f->R.rax = (uint64_t)sys_write((int)f->R.rdi, (const void *)f->R.rsi, (unsigned)f->R.rdx);
+    //   break;
 
     
     case SYS_CREATE: {
@@ -319,25 +314,27 @@ void syscall_handler (struct intr_frame *f) {
       break;
     }
 
-    case SYS_READ: {
-      int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
-      void *buffer = (void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
-      unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
-      f->R.rax = (int)sys_read(fd, buffer, size);    // 리턴값을 RAX에 실어줌
-      break;
-    }
-
     case SYS_FILESIZE:
       f->R.rax = filesize(f->R.rdi);
       break;
 
-    // case SYS_WRITE: {
-    //   int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
-    //   void *buffer = (const void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
-    //   unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
-    //   f->R.rax = (int)sys_write(fd, buffer, size);    // 리턴값을 RAX에 실어줌
-    //   break;
-    // }
+    case SYS_READ: {
+      int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
+      void *buffer = (void *)f->R.rsi;                    // RSI: 2번째 인자 → 사용자 버퍼 포인터
+      unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
+      f->R.rax = (int)sys_read(fd, buffer, size);         // 리턴값을 RAX에 실어줌
+      break;
+    }
+
+    
+
+    case SYS_WRITE: {
+      int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
+      void *buffer = (const void *)f->R.rsi;              // RSI: 2번째 인자 → 사용자 버퍼 포인터
+      unsigned size = (unsigned)f->R.rdx;                 // RDX: 3번째 인자 → 읽을 바이트 수
+      f->R.rax = (int)sys_write(fd, buffer, size);        // 리턴값을 RAX에 실어줌
+      break;
+    }
 
 
     default:
