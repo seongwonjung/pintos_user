@@ -117,6 +117,8 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
+  struct intr_frame fork_if;   // 🅵 부모 intr_frame 스냅샷 저장용
+
 #ifdef USERPROG
   // 🚧  프로세스 관계
   struct thread *parent;     // 부모

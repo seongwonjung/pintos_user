@@ -28,6 +28,7 @@
 #include <stdint.h>          // uintptr_t
 #include "filesys/file.h"  // file_length(), file_tell()
 
+#include "userprog/process.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -281,6 +282,30 @@ static int sys_write(int fd, const void *buffer, unsigned size){
 }
 
 
+// 🅵 FORK(부모): 유저가 준 인자(프로세스 이름 등)를 안전하게 커널로 들여와 process_fork() 호출
+static tid_t sys_fork(const char *thread_name){
+  
+  // fork를 한다 -> 포크 되면 자식프로세스가 생성되니까 그 자식 프로세스의 pid를 반환하면된다.
+
+  // 유효성 검사
+  // 커널 버퍼로 복사하는거 
+  char *fbuf = copy_in_string_or_exit(thread_name);
+
+  // 2. 부모 스냅샷
+  struct thread *parent = thread_current();
+  struct intr_frame *parent_if = &parent->fork_if;
+  
+  // 포크 실행
+  tid_t child_tid = process_fork(fbuf, parent_if);
+
+  palloc_free_page(fbuf);
+  return (tid_t)child_tid;
+}
+
+static int sys_wait (tid_t pid){
+  return process_wait(pid);
+}
+
 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
 void syscall_handler (struct intr_frame *f) {
@@ -289,11 +314,6 @@ void syscall_handler (struct intr_frame *f) {
     case SYS_EXIT:                            // exit(status) => RDI만 사용
       sys_exit((int)f->R.rdi);                // 첫 번째 인자(RDI)를 int로 변환해서 sys_exit에 넘김
       break;
-
-    // case SYS_WRITE:                    // rdi=fd, rsi=buf(유저 주소), rdx=size
-    //   f->R.rax = (uint64_t)sys_write((int)f->R.rdi, (const void *)f->R.rsi, (unsigned)f->R.rdx);
-    //   break;
-
     
     case SYS_CREATE: {
       const char *ufile = (const char *)f->R.rdi;      // RDI: 1번째 인자 → filename 포인터
@@ -336,7 +356,16 @@ void syscall_handler (struct intr_frame *f) {
       break;
     }
 
-
+   case SYS_FORK: {
+      thread_current()->fork_if = *f;                       // ★ 부모 유저 컨텍스트 스냅샷  
+      const char *thread_name = (const char *)f->R.rdi;    // RDI: 1번째 인자 → 이름 포인터
+      f->R.rax = (uint64_t)sys_fork(thread_name);        // 리턴값을 RAX에 실어줌
+      break;
+    }
+    case SYS_WAIT: {  
+      f->R.rax = (int)sys_wait((tid_t) f->R.rdi);        // 리턴값을 RAX에 실어줌
+      break;
+    }
     default:
       sys_exit(-1);      // 모르는 시스템콜 번호면 "프로세스 종료(-1)"로 처리
   }

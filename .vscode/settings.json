@@ -28,7 +28,8 @@
         "palloc.h": "c",
         "file.h": "c",
         "syscall.h": "c",
-        "input.h": "c"
+        "input.h": "c",
+        "typeinfo": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

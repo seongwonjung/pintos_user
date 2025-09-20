@@ -167,18 +167,71 @@ static void initd (void *f_name) {
 
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
-tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
-	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+// 🅵 자식 시작에 필요한 정보를 aux 구조체에 담아 두고, 자식 스레드 생성만 -> 부모 대기
+struct fork_aux{
+	struct thread *parent;
+	struct intr_frame *parent_if;
+	struct semaphore done;           // 부모-자식 동기화
+	bool result;                    // 자식 쪽 복제 성공 여부
+	struct child *c;          // ← ★ 추가: 부모-자식 wait용 노드
+};
+
+/* Clone current thread to new thread.*/
+// return thread_create (name, PRI_DEFAULT, __do_fork, thread_current ());
+// 자식프로세스를 fork 하는동안 sema_down 해줘야 됨
+// 자식이 __do_fork 에서 fork가 완료되면 sema_up으로 꺠워야 됨
+
+tid_t process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+	
+	// 1. fork 전달용 aux 구조체 동적 할당
+	struct fork_aux *aux = malloc(sizeof *aux);
+	if(!aux) return TID_ERROR;         
+	
+	aux->parent = thread_current();
+	aux->parent_if = if_;
+	aux->result = false;
+	sema_init(&aux->done, 0);
+
+	// 자식 스레드 생성
+	struct child *c = malloc(sizeof *c);
+	 if (!c) { free(aux); return TID_ERROR; }
+     c->tid = TID_ERROR;
+     c->exit_status = -1;
+     c->load_success = false;
+     sema_init(&c->load_sema, 0);
+     sema_init(&c->wait_sema, 0);
+    c->exited = false;
+
+    /* 2) 부모 children 에 먼저 등록 (레이스 방지) */
+    list_push_back(&aux->parent->children, &c->elem);
+
+    /* 3) 자식이 바로 쓸 포인터를 미리 전달 */
+    aux->c = c;
+
+	tid_t child_tid = thread_create (name, PRI_DEFAULT, __do_fork, aux);
+	if (child_tid == TID_ERROR) {
+		list_remove(&c->elem);
+		free(c);
+		free(aux);
+		return TID_ERROR;
+	}
+
+	c->tid = child_tid;         // 자식 tid 기록
+	
+    sema_down(&aux->done);                         // 부모 대기
+
+
+
+	// 성공, 실패 분기
+	bool result = aux->result;
+	free(aux);                                      // aux 메모리 해제
+	return result ? child_tid : TID_ERROR;
 }
 
 #ifndef VM
 /* Duplicate the parent's address space by passing this function to the
  * pml4_for_each. This is only for the project 2. */
-static bool
-duplicate_pte (uint64_t *pte, void *va, void *aux) {
+static bool duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	struct thread *current = thread_current ();
 	struct thread *parent = (struct thread *) aux;
 	void *parent_page;
@@ -186,23 +239,33 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	/* 1) 커널 VA는 복제 대상 아님 */
+    if (is_kernel_vaddr(va)) return true;
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
 
-	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
-	 *    TODO: NEWPAGE. */
+	/* 3. TODO: Allocate new PAL_USER page for the child and set result to NEWPAGE. */
+	/* 3) 자식용 유저 페이지 할당 */
+	newpage = palloc_get_page(PAL_USER);
+    if (newpage == NULL) return false;
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	/* 4) 내용 복제 + writable 비트 반영 */
+    memcpy(newpage, parent_page, PGSIZE);
+    writable = (*pte & PTE_W) != 0;
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
-	}
-	return true;
+		/* 6) 매핑 실패 시 해제 */
+        palloc_free_page(newpage);
+       return false;
+    }
+    return true;
 }
 #endif
 
@@ -210,8 +273,9 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  * Hint) parent->tf does not hold the userland context of the process.
  *       That is, you are required to pass second argument of process_fork to
  *       this function. */
-static void
-__do_fork (void *aux) {
+
+// 🅵 자식이 “부모의 현재 상태”를 자기 것으로 만듦
+static void __do_fork (void *aux) {
 	struct intr_frame if_;
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
@@ -220,22 +284,44 @@ __do_fork (void *aux) {
 	struct intr_frame *parent_if;
 	bool succ = true;
 
+	// ⬇️  aux를 올바른 타입으로 꺼내고, parent/parent_if 세팅
+	struct fork_aux *fa = (struct fork_aux *)aux;
+	parent = fa->parent;
+	parent_if = fa->parent_if;
+	current->as_child = fa->c;     // 부모-자식 wait 핸드셰이크 연결
+    current->parent   = parent;    // (권장) 부모 포인터도 세팅
+
 	/* 1. Read the cpu context to local stack. */
+	/*부모 intr_frame 스냅샷을 자식 로컬 if_에 '값 복사'*/
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+
+	// ⬇️ 자식의 fork() 반환값 0으로 만들기
+	if_.R.rax = 0;
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
-	if (current->pml4 == NULL)
+	if (current->pml4 == NULL){
+	    //⬇️ 실패 통지 후 부모 깨우고 에러로
+		fa->result = false;
+		sema_up(&fa->done);
 		goto error;
-
+	}
 	process_activate (current);
 #ifdef VM
 	supplemental_page_table_init (&current->spt);
-	if (!supplemental_page_table_copy (&current->spt, &parent->spt))
+	if (!supplemental_page_table_copy (&current->spt, &parent->spt)){
+	   // ⬇️ 실패 통지 후 부모 깨우고 에러로
+		fa->result = false;
+		sema_up(&fa->done);
 		goto error;
+	}
 #else
-	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
+	if (!pml4_for_each (parent->pml4, duplicate_pte, parent)){
+	   // ⬇️ 실패 통지 후 부모 깨우고 에러로
+		fa->result = false;
+		sema_up(&fa->done);
 		goto error;
+	}
 #endif
 
 	/* TODO: Your code goes here.
@@ -243,6 +329,30 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+
+
+	// FDT 복제 (file_duplicate 사용)
+	for(int fd = FD_MIN; fd < FD_MAX; fd++){
+		struct file *pf = parent->fd_table[fd];
+		if(!pf) {current->fd_table[fd] = NULL; continue;}
+
+		struct file *cf = file_duplicate(pf);
+		if (cf == NULL) {
+			/* 부분 롤백: 지금까지 꽂은 핸들 닫기 */
+			for (int i = FD_MIN; i < fd; i++) {
+				if (current->fd_table[i]) {
+					file_close(current->fd_table[i]);
+					current->fd_table[i] = NULL;
+				}
+			}
+			fa->result = false; sema_up(&fa->done); goto error;
+		}
+		current->fd_table[fd] = cf;
+	}
+
+	// 부모에게 “복제 끝!” 신호 보내기
+	fa->result = true;
+    sema_up(&fa->done);
 
 	process_init ();
 
