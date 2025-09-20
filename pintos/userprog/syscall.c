@@ -14,6 +14,7 @@
 #include "threads/interrupt.h"
 #include "threads/loader.h"
 #include "threads/palloc.h"
+#include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/gdt.h"
@@ -30,6 +31,9 @@ static void sys_halt(struct intr_frame *f);
 static void sys_open(struct intr_frame *f);
 static void sys_filesize(struct intr_frame *f);
 static void sys_close(struct intr_frame *f);
+static void sys_fork(struct intr_frame *f);
+static void sys_wait(struct intr_frame *f);
+static void sys_exec(struct intr_frame *f);
 /* System call.
  *
  * Previously system call services was handled by the interrupt handler
@@ -43,8 +47,8 @@ static void sys_close(struct intr_frame *f);
 #define MSR_LSTAR 0xc0000082        /* Long mode SYSCALL target */
 #define MSR_SYSCALL_MASK 0xc0000084 /* Mask for the eflags */
 #define STRLEN_FAIL ((size_t)-1)
-// 파일 시스템 전역 락
-static struct lock filesys_lock;
+// 파일 시스템 락
+struct lock filesys_lock;
 // 유효 주소 검사
 static bool validate_user_addr(const void *addr);
 
@@ -118,6 +122,16 @@ static char *copy_in_string(const char *u) {
   }
   return k;  // 호출자가 palloc_free_page로 해제
 }
+/* NULL체크, 빈문자열인지 체크
+ 빈문자열이거나 NULL 일 경우 0 return
+ 아니면 1 반환 */
+static int copy_check(char *buf) {
+  if (!buf || buf[0] == '\0') {
+    if (buf) palloc_free_page(buf);
+    return -1;
+  }
+  return 1;
+}
 
 /* FD를 위한 헬퍼 함수들 */
 // fd테이블에서 할당 가능 fd_entry 찾아주기
@@ -163,9 +177,9 @@ typedef void (*syscall_handler_t)(
 static const syscall_handler_t syscall_tbl[] = {
     [SYS_HALT] = sys_halt,
     [SYS_EXIT] = sys_exit,
-    [SYS_FORK] = NULL,
+    [SYS_FORK] = sys_fork,
     [SYS_EXEC] = NULL,
-    [SYS_WAIT] = NULL,
+    [SYS_WAIT] = sys_wait,
     [SYS_CREATE] = sys_create,
     [SYS_REMOVE] = NULL,
     [SYS_OPEN] = sys_open,
@@ -260,9 +274,8 @@ static void sys_write(struct intr_frame *f) {
   // 커널영역의 버퍼로 담아서 하기
   char *k_buf = palloc_get_page(PAL_ZERO);
   k_buf = copy_in_string(buf);
-  // // NULL체크, 빈문자열인지 체크
-  if (!k_buf || k_buf[0] == '\0') {
-    if (k_buf) palloc_free_page(k_buf);
+  // NULL체크, 빈문자열인지 체크
+  if (copy_check(k_buf) == -1) {
     f->R.rax = -1;
     return;
   }
@@ -296,12 +309,11 @@ static void sys_create(struct intr_frame *f) {
 
   // k_filename 으로 복사(유저 -> 커널)
   char *k_filename = copy_in_string(u_filename);
-  if (!k_filename || k_filename[0] == '\0') {
-    if (k_filename) palloc_free_page(k_filename);
-    f->R.rax = 0;
+  // 빈 문자열, NULL 체크
+  if (copy_check(k_filename) == -1) {
+    f->R.rax = 0;  // create-empty 일 때 0 반환
     return;
   }
-
   lock_acquire(&filesys_lock);
   bool succ = filesys_create(k_filename, init_size);
   lock_release(&filesys_lock);
@@ -324,12 +336,11 @@ static void sys_open(struct intr_frame *f) {
   }
   // 커널에 복사
   char *k_filename = copy_in_string(u_filename);
-  if (!k_filename || k_filename[0] == '\0') {
-    if (k_filename) palloc_free_page(k_filename);
+  // 빈 문자열, NULL 체크
+  if (copy_check(k_filename) == -1) {
     f->R.rax = -1;
     return;
   }
-
   lock_acquire(&filesys_lock);
   struct file *file = filesys_open(k_filename);
   lock_release(&filesys_lock);
@@ -376,9 +387,62 @@ static void sys_close(struct intr_frame *f) {
 
 static void sys_fork(struct intr_frame *f) {
   const char *thread_name = f->R.rdi;
+  // 유효성 검사
   if (!validate_user_addr(thread_name)) {
     sys_exit_with_error(f);
     return;
   }
-  tid_t child_pid = process_fork(thread_name, f);
+  // 커널 버퍼에 복사
+  char *k_thread_name = palloc_get_page(PAL_ZERO);
+  k_thread_name = copy_in_string(thread_name);
+  // 빈 문자열, NULL 체크
+  if (copy_check(k_thread_name) == -1) {
+    f->R.rax = -1;
+    return;
+  }
+  tid_t child_pid = process_fork(k_thread_name, f);
+  if (child_pid == TID_ERROR) {
+    f->R.rax = -1;
+  } else {
+    f->R.rax = child_pid;
+  }
+  palloc_free_page(k_thread_name);
+  return;
 }
+
+static void sys_wait(struct intr_frame *f) {
+  tid_t pid = f->R.rdi;  // 자식 프로세스 pid
+  f->R.rax = process_wait(pid);
+  return;
+}
+
+// static void sys_exec(struct intr_frame *f) {
+//   const char *cmd_line = f->R.rdi;
+//   if (!validate_user_addr(cmd_line)) {
+//     sys_exit_with_error(f);
+//   }
+//   char *f_cmd_line = copy_in_string(cmd_line);
+//   if (copy_check(f_cmd_line) == 0) {
+//     f->R.rax = -1;
+//     return;
+//   }
+
+//   /* 커맨드라인 복사용 임시 페이지 버퍼 */
+//   char *cmd_tmp = palloc_get_page(PAL_ZERO);
+//   if (cmd_tmp == NULL) {
+//     f->R.rax = -1;
+//     return;
+//   }
+//   strlcpy(cmd_tmp, f_cmd_line, PGSIZE);
+//   char *saveptr = NULL;
+//   char *file_name = strtok_r(cmd_tmp, "\t\r\n ", &saveptr);
+//   struct file *file = file_open(file_name);
+//   if (file == NULL) {
+//     printf("%s: -1\n", file_name);
+//     f->R.rax = -1;
+//     return;
+//   }
+
+//   int status = process_exec((void *)f_cmd_line);
+//   f->R.rax = status;
+// }
