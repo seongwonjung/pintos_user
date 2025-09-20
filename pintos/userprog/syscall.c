@@ -28,7 +28,8 @@
 #include <stdint.h>          // uintptr_t
 #include "filesys/file.h"  // file_length(), file_tell()
 
-#include "userprog/process.h"
+// 🅵
+#include "userprog/process.h"  // process_fork, process_wait, process_exit
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -283,23 +284,21 @@ static int sys_write(int fd, const void *buffer, unsigned size){
 
 
 // 🅵 FORK(부모): 유저가 준 인자(프로세스 이름 등)를 안전하게 커널로 들여와 process_fork() 호출
+// fork 하기 -> (fork O)자식프로세스 생성 -> 그 자식 프로세스의 pid 반환
 static tid_t sys_fork(const char *thread_name){
-  
-  // fork를 한다 -> 포크 되면 자식프로세스가 생성되니까 그 자식 프로세스의 pid를 반환하면된다.
-
-  // 유효성 검사
-  // 커널 버퍼로 복사하는거 
+  // 1. 유효성 검사 & 커널 버퍼로 복사 
   char *fbuf = copy_in_string_or_exit(thread_name);
 
-  // 2. 부모 스냅샷
+  // 2. 부모 레지스터 상태 복사(유저->커널)
   struct thread *parent = thread_current();
-  struct intr_frame *parent_if = &parent->fork_if;
+  struct intr_frame *parent_if = &parent->fork_if;    
   
-  // 포크 실행
-  tid_t child_tid = process_fork(fbuf, parent_if);
+  // 3. 포크 실행
+  tid_t child_pid = process_fork(fbuf, parent_if);
 
-  palloc_free_page(fbuf);
-  return (tid_t)child_tid;
+  // 4. 정리
+  palloc_free_page(fbuf);     // 버퍼 반납
+  return (tid_t)child_pid;    // 반환
 }
 
 static int sys_wait (tid_t pid){
@@ -311,6 +310,7 @@ static int sys_wait (tid_t pid){
 void syscall_handler (struct intr_frame *f) {
   uint64_t num = f->R.rax;                    // 시스템콜 번호(RAX 확인)
   switch (num) {
+    
     case SYS_EXIT:                            // exit(status) => RDI만 사용
       sys_exit((int)f->R.rdi);                // 첫 번째 인자(RDI)를 int로 변환해서 sys_exit에 넘김
       break;
@@ -346,8 +346,6 @@ void syscall_handler (struct intr_frame *f) {
       break;
     }
 
-    
-
     case SYS_WRITE: {
       int fd = (int)f->R.rdi;                             // RDI: 1번째 인자 → fd
       void *buffer = (const void *)f->R.rsi;              // RSI: 2번째 인자 → 사용자 버퍼 포인터
@@ -357,13 +355,14 @@ void syscall_handler (struct intr_frame *f) {
     }
 
    case SYS_FORK: {
-      thread_current()->fork_if = *f;                       // ★ 부모 유저 컨텍스트 스냅샷  
-      const char *thread_name = (const char *)f->R.rdi;    // RDI: 1번째 인자 → 이름 포인터
-      f->R.rax = (uint64_t)sys_fork(thread_name);        // 리턴값을 RAX에 실어줌
+      thread_current()->fork_if = *f;                       // ★ 부모 유저 프레임 복사  
+      const char *thread_name = (const char *)f->R.rdi;     // RDI: 1번째 인자 → 이름 포인터
+      f->R.rax = (uint64_t)sys_fork(thread_name);           // 리턴값을 RAX에 실어줌
       break;
     }
+
     case SYS_WAIT: {  
-      f->R.rax = (int)sys_wait((tid_t) f->R.rdi);        // 리턴값을 RAX에 실어줌
+      f->R.rax = (int)sys_wait((tid_t) f->R.rdi);           // 리턴값을 RAX에 실어줌
       break;
     }
     default:

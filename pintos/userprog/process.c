@@ -169,11 +169,11 @@ static void initd (void *f_name) {
  * TID_ERROR if the thread cannot be created. */
 // 🅵 자식 시작에 필요한 정보를 aux 구조체에 담아 두고, 자식 스레드 생성만 -> 부모 대기
 struct fork_aux{
-	struct thread *parent;
-	struct intr_frame *parent_if;
-	struct semaphore done;           // 부모-자식 동기화
-	bool result;                    // 자식 쪽 복제 성공 여부
-	struct child *c;          // ← ★ 추가: 부모-자식 wait용 노드
+	struct thread *parent;              // 부모 스레드 포인터
+	struct intr_frame *parent_if;       // 부모 '유저 컨텍스트' 스냅샷 주소
+	struct semaphore done;              // 부모-자식 동기화
+	bool result;                       // 자식 쪽 복제 성공 여부
+	struct child *c;                   // 부모-자식 wait용 노드(부모 children 리스트의 '자식 정보' 포인터)
 };
 
 /* Clone current thread to new thread.*/
@@ -181,6 +181,7 @@ struct fork_aux{
 // 자식프로세스를 fork 하는동안 sema_down 해줘야 됨
 // 자식이 __do_fork 에서 fork가 완료되면 sema_up으로 꺠워야 됨
 
+// 🅵 (부모) 자식 스레드 생성 + 부모-자식 연결 + 자식 준비 완료까지 부모 대기
 tid_t process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	
 	// 1. fork 전달용 aux 구조체 동적 할당
@@ -188,11 +189,11 @@ tid_t process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	if(!aux) return TID_ERROR;         
 	
 	aux->parent = thread_current();
-	aux->parent_if = if_;
+	aux->parent_if = if_;              // 자식이 그대로 복사해서 시작할 유저 레지스터
 	aux->result = false;
 	sema_init(&aux->done, 0);
 
-	// 자식 스레드 생성
+	// 2. 부모가 들고 있을 “자식 정보(child)” 만들기
 	struct child *c = malloc(sizeof *c);
 	 if (!c) { free(aux); return TID_ERROR; }
      c->tid = TID_ERROR;
@@ -200,29 +201,26 @@ tid_t process_fork (const char *name, struct intr_frame *if_ UNUSED) {
      c->load_success = false;
      sema_init(&c->load_sema, 0);
      sema_init(&c->wait_sema, 0);
-    c->exited = false;
+     c->exited = false;
 
-    /* 2) 부모 children 에 먼저 등록 (레이스 방지) */
-    list_push_back(&aux->parent->children, &c->elem);
-
-    /* 3) 자식이 바로 쓸 포인터를 미리 전달 */
+    /* (레이스 방지) 부모 리스트에 먼저 등록 + 자식에게 포인터 전달 */
+    list_push_back(&aux->parent->children, &c->elem);  // 부모 명부에 등록
     aux->c = c;
 
+	// 3. 자식 스레드 생성
 	tid_t child_tid = thread_create (name, PRI_DEFAULT, __do_fork, aux);
-	if (child_tid == TID_ERROR) {
+	if (child_tid == TID_ERROR) {      // 실패
 		list_remove(&c->elem);
 		free(c);
 		free(aux);
 		return TID_ERROR;
 	}
-
-	c->tid = child_tid;         // 자식 tid 기록
+	c->tid = child_tid;         // 성공: 자식 tid 기록
 	
-    sema_down(&aux->done);                         // 부모 대기
+	// 4. 자식 준비 완료까지 부모 대기
+    sema_down(&aux->done);    
 
-
-
-	// 성공, 실패 분기
+	// 5. 성공, 실패 분기
 	bool result = aux->result;
 	free(aux);                                      // aux 메모리 해제
 	return result ? child_tid : TID_ERROR;
@@ -271,33 +269,32 @@ static bool duplicate_pte (uint64_t *pte, void *va, void *aux) {
 
 /* A thread function that copies parent's execution context.
  * Hint) parent->tf does not hold the userland context of the process.
- *       That is, you are required to pass second argument of process_fork to
- *       this function. */
+ *       That is, you are required to pass second argument of process_fork to this function. */
+// => parent->tf 시용X, process_fork()의 두 번째 인자(부모 유저 프레임) 사용 필요
 
-// 🅵 자식이 “부모의 현재 상태”를 자기 것으로 만듦
+// 🅵 (자식) 자식이 “부모의 현재 상태”를 자기 것으로 만듦 -> 부모에게 “준비 끝!”을 알린 뒤 자식으로서 유저모드에 진입
 static void __do_fork (void *aux) {
 	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
+	// /* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
 
-	struct intr_frame *parent_if;
+
+	// 1. aux를 올바른 타입으로 꺼내기
+	struct fork_aux *fa = (struct fork_aux *)aux; 
+	struct thread *parent = fa->parent;               // 부모 스레드 포인터
+	struct intr_frame *parent_if = fa->parent_if;     // 부모 유저 레지스터 스냅샷 주소
 	bool succ = true;
 
-	// ⬇️  aux를 올바른 타입으로 꺼내고, parent/parent_if 세팅
-	struct fork_aux *fa = (struct fork_aux *)aux;
-	parent = fa->parent;
-	parent_if = fa->parent_if;
+	// 2. 부모-자식 연결
 	current->as_child = fa->c;     // 부모-자식 wait 핸드셰이크 연결
     current->parent   = parent;    // (권장) 부모 포인터도 세팅
-
-	/* 1. Read the cpu context to local stack. */
-	/*부모 intr_frame 스냅샷을 자식 로컬 if_에 '값 복사'*/
+	
+	// 3. 자식 시작값을 부모 유저 레지스터 값으로 
+	/* 1. Read the cpu context to local stack. */ /*부모 intr_frame 스냅샷을 자식 로컬 if_에 '값 복사'*/
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	if_.R.rax = 0;         // 자식의 fork() 반환값 0으로 만들기
 
-	// ⬇️ 자식의 fork() 반환값 0으로 만들기
-	if_.R.rax = 0;
-
+	// 4. 주소공간 복제(메모리)
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
 	if (current->pml4 == NULL){
@@ -331,34 +328,39 @@ static void __do_fork (void *aux) {
 	 * TODO:       the resources of parent.*/
 
 
-	// FDT 복제 (file_duplicate 사용)
+	// 5. FD Table 복제 (file_duplicate 사용)
 	for(int fd = FD_MIN; fd < FD_MAX; fd++){
-		struct file *pf = parent->fd_table[fd];
+		struct file *pf = parent->fd_table[fd];      // 부모용 핸들
 		if(!pf) {current->fd_table[fd] = NULL; continue;}
 
-		struct file *cf = file_duplicate(pf);
-		if (cf == NULL) {
-			/* 부분 롤백: 지금까지 꽂은 핸들 닫기 */
+		struct file *cf = file_duplicate(pf);       // 자식용 새 핸들 cf
+		
+		// 실패: 지금까지 꽂은 핸들 닫기
+		if (!cf) {
 			for (int i = FD_MIN; i < fd; i++) {
 				if (current->fd_table[i]) {
 					file_close(current->fd_table[i]);
 					current->fd_table[i] = NULL;
 				}
 			}
-			fa->result = false; sema_up(&fa->done); goto error;
+			fa->result = false;      // 자식 쪽에서 "복제 실패" 표시
+			sema_up(&fa->done);      // 부모 깨워서 실패 알림
+			goto error;              // 자식 스레드 종료 경로로
 		}
-		current->fd_table[fd] = cf;
+
+		current->fd_table[fd] = cf;     // 성공: 자식 테이블의 같은 칸에 새 핸들을 꽂음
 	}
 
-	// 부모에게 “복제 끝!” 신호 보내기
+	// 6. 부모에게 “복제 끝!” 신호 보내기
 	fa->result = true;
     sema_up(&fa->done);
 
 	process_init ();
 
+	// 7. 성공, 실패 분기
 	/* Finally, switch to the newly created process. */
 	if (succ)
-		do_iret (&if_);
+		do_iret (&if_);     // 자식으로 출발(유저모드 진입)
 error:
 	thread_exit ();
 }
