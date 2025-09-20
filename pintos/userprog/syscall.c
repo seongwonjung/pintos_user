@@ -16,6 +16,11 @@
 #include "filesys/directory.h"   // NAME_MAX
 #include "threads/synch.h"       // lock
 #include "threads/mmu.h"         // pml4_get_page (매핑 확인)
+#include "devices/input.h"   // input_getc()
+#include "lib/kernel/console.h"
+#include "filesys/file.h"   // 반드시 추가 (file_read/write/length/close)
+#include "threads/malloc.h" // malloc/free 쓰면 명시적으로 포함
+
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -29,6 +34,10 @@ int sys_open(const char* u_name);
 void sys_close(int fd);
 int fdtable_insert(struct thread *t, struct file *f);
 static int take_free_fd(struct thread *t);
+static struct file *fd_to_file_find(struct thread *t, int fd);
+static int sys_read(int fd, void *user_buf, unsigned size);
+static int sys_filesize (int fd);
+
 
 
 // 전역변수
@@ -46,6 +55,9 @@ static struct lock filesys_lock;  // 전역 락
 #define MSR_STAR 0xc0000081         /* Segment selector msr */
 #define MSR_LSTAR 0xc0000082        /* Long mode SYSCALL target */
 #define MSR_SYSCALL_MASK 0xc0000084 /* Mask for the eflags */
+#define FD_STDIN    0
+#define FD_STDOUT   1
+#define MIN_USER_FD 2 
 
 void
 syscall_init (void) {
@@ -76,6 +88,10 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		f->R.rax = sys_write((int)f->R.rdi, (const void*)f->R.rsi, (unsigned)f->R.rdx);
 		break;
 
+    case SYS_READ:
+    f->R.rax = sys_read((int)f->R.rdi, (void*)f->R.rsi, (unsigned)f->R.rdx);
+    break;
+
     case SYS_CREATE:
     f->R.rax = sys_create((const char*)f->R.rdi, (unsigned)f->R.rsi);
     break;
@@ -88,12 +104,12 @@ syscall_handler (struct intr_frame *f UNUSED) {
     sys_close((int)f->R.rdi);
     break;
 
-    case SYS_READ:
-    f->R.rax = sys_read()
+    case SYS_FILESIZE:
+    f->R.rax = sys_filesize((int)f->R.rdi);
     break;
-    
+
 		default:
-		sys_exit(0);                      // 미지원 → 종료
+		sys_exit(-1);                      // 미지원 → 종료
   }
 }
 
@@ -111,25 +127,66 @@ static void sys_exit(int status) {
 }
 
 // write
+// 이미 있던 stdout 전용 버전을 "파일도 지원"하도록 확장
 static int sys_write(int fd, const void *user_buf, unsigned size) {
-  if (fd == 1) { // stdout
-    if (size == 0) return 0;
-    validate_user_buffer(user_buf, size);
-
-    // 커널 버퍼에 안전 복사(간단 버전). 큰 size는 나눠서 처리 권장.
-    size_t n = size;
-    if (n > PGSIZE) n = PGSIZE;  // 임시로 4KB만 (테스트 통과 후 확장)
-    void *kbuf = palloc_get_page(0);
-    if (kbuf == NULL) sys_exit(-1);
-
-    memcpy(kbuf, user_buf, n);   // 엄밀히는 copy-from-user 루틴이 바람직
-    putbuf(kbuf, n);             // 콘솔 출력
-    palloc_free_page(kbuf);
-    return (int) n;
+  if (size == 0) {
+    return 0;
+  }
+  
+  if (fd == FD_STDIN) {
+    return -1;
   }
 
-  // 파일 디스크립터는 추후 과제에서 구현
-  return -1;
+  validate_user_buffer(user_buf, size);  // 최소 접근성 확인(추가로 페이지 경계 검증 OK)
+  // 1) 콘솔(stdout)
+if (fd == FD_STDOUT) {
+
+  // 전체 범위 검증
+  validate_user_buffer(user_buf, size);
+  // 중간복사 없이 바로 출력
+  putbuf((const char *)user_buf, (size_t)size);  
+
+  return (int)size;
+}
+
+}
+
+// read
+// 필요 헤더: file_* 사용 시
+// #include "filesys/file.h"
+
+static int sys_read(int fd, void *ubuf, unsigned size) {
+  if (!size) return 0;
+  validate_user_buffer(ubuf, size);
+
+  if (fd == FD_STDIN) {
+    uint8_t *p = ubuf;
+    for (unsigned i = 0; i < size; i++) p[i] = input_getc();
+    return (int)size;
+  }
+  if (fd == FD_STDOUT) return -1;
+
+  struct file *f = fd_to_file_find(thread_current(), fd);
+  if (!f) return -1;
+
+  void *k = palloc_get_page(0);
+  if (!k) sys_exit(-1);
+
+  unsigned done = 0;
+lock_acquire(&filesys_lock);
+while (done < size) {
+  unsigned chunk = (size - done > PGSIZE) ? PGSIZE : (size - done);
+  int r = file_read(f, k, (off_t)chunk);
+  if (r < 0) { done = -1; break; }  // 에러
+  if (r == 0) break;                // EOF
+  memcpy((uint8_t*)ubuf + done, k, (size_t)r);
+  done += (unsigned)r;              // ★ r<chunk 여도 계속 시도
+}
+lock_release(&filesys_lock);
+
+
+  palloc_free_page(k);
+  return (int)done;
 }
 
 // create
@@ -154,39 +211,6 @@ static bool sys_create(const char* u_name, unsigned init_size) {
   return ok;
 }
 
-// // open
-// static int sys_open (const char* file) {
-//   char* kname[NAME_MAX + 1];
-//   int fd;
-//   // 입력값 검증
-//   if (file == NULL) {
-//     sys_exit(-1);
-//   }
-
-//   int n = copy_string(kname, file, NAME_MAX + 1);
-//   // 입력값 바이트단위 검증
-//   if (kname[0] == '\0') {
-//     return -1;
-//   }
-//   if (n == -2) {
-//     return -1;
-//   }
-//   // 파일 open
-//   lock_acquire(&filesys_lock);
-//   struct file* f = filesys_open(file);
-//   lock_release(&filesys_lock);
-//   //open파일 검증
-//   if (f == NULL) {
-//     sys_exit(-1);
-//   }
-//   // fd 할당
-//   fd = fdtable_insert(thread_current(), f);
-//   //fd 검증
-//   if (fd > 0) {
-//     sys_exit(-1);
-//   }
-// }
-
 // open
 int sys_open(const char* u_name) {
   if (u_name == NULL) sys_exit(-1);
@@ -196,6 +220,7 @@ int sys_open(const char* u_name) {
   int n = copy_string(kname, u_name, sizeof kname);   // 사용자 포인터 검증+복사
   if (n < 0 || kname[0] == '\0') return -1;
 
+  
   lock_acquire(&filesys_lock);
   struct file* f = filesys_open(kname);               // kname 사용!
   lock_release(&filesys_lock);
@@ -203,6 +228,7 @@ int sys_open(const char* u_name) {
 
   struct thread *t = thread_current();                // 인자 없이 호출
   int fd = fdtable_insert(t, f);                      // ← 여기서 fd 선언 필요
+
   if (fd < 0) { 
     file_close(f); return -1; // 실패시 누수 방지
   }           
@@ -210,12 +236,15 @@ int sys_open(const char* u_name) {
   return fd;
 }
 
-
 // close
 void sys_close(int fd) {
   struct thread *t = thread_current();
   struct list_elem *e;
-  // ??
+
+  if (fd == FD_STDIN || fd == FD_STDOUT) {
+    return;
+  }
+  // fds리스트를 순회
   for (e = list_begin(&t->fds); e != list_end(&t->fds); e = list_next(e)) {
     struct fd_entry *ent = list_entry(e, struct fd_entry, elem);
 
@@ -234,6 +263,26 @@ void sys_close(int fd) {
   // 잘못된 fd면 과제 정책에 맞게 -1 반환 또는 exit 처리
 }
 
+// 파일을 바이트단위로 읽고 읽은 크기를 반환
+static int sys_filesize (int fd) {
+  
+  if (fd == FD_STDIN || fd == FD_STDOUT) {
+    return -1;
+  }
+
+  struct file *f = fd_to_file_find(thread_current(), fd);
+
+  if (!f) {
+    return -1;
+  }
+
+  lock_acquire(&filesys_lock);
+  int len = (int)file_length(f);
+  lock_release(&filesys_lock);
+
+  return len;
+}
+
 // 유저 문자열을 널까지 안전 복사
 // - limit(NAME_MAX)를 넘기면 -2 반환(→ 의미 오류로 false 반환)
 // - 포인터 불량이면 내부에서 sys_exit(-1)
@@ -249,7 +298,6 @@ static int copy_string (char *dst, const char *us, size_t limit) {
   }
   return (int)i; 
 }
-
 
 // 잘못된 유저 주소 접근시, 해당 프로세스를 -1로 종료
 static void bad_addr(const void* uaddr) {
@@ -285,20 +333,53 @@ int fdtable_insert(struct thread *t, struct file *f) {
 }
 
 // free_fds에서 하나 꺼내기
-static int take_free_fd(struct thread *t) {
-  if (list_empty(&t->free_fds)) return -1;
-  struct list_elem *e = list_pop_front(&t->free_fds);
-  struct fd_free *n = list_entry(e, struct fd_free, elem);
-  int fd = n->fd;
-  free(n);
-  return fd;
+// static int take_free_fd(struct thread *t) {
+//   if (list_empty(&t->free_fds)) return -1;
+//   struct list_elem *e = list_pop_front(&t->free_fds);
+//   struct fd_free *n = list_entry(e, struct fd_free, elem);
+//   int fd = n->fd;
+//   free(n);
+//   return fd;
+// }
+
+// free_fds리스트에서 노드 한개 꺼내기
+static int take_free_fd (struct thread* t) {
+  while (!list_empty(&t->free_fds)) {
+    if (list_empty(&t->free_fds)) return -1;
+      struct list_elem *e = list_pop_front(&t->free_fds);
+      struct fd_free *n = list_entry(e, struct fd_free, elem);
+      int fd = n->fd;
+      free(n);
+      if (fd >= MIN_USER_FD) {
+        return fd;
+    }
+  }
+  return -1;
 }
 
 static void validate_user_buffer(const void *uaddr, size_t size) {
-  // 가장 단순한 버전(프로젝트2 수준): 유저 영역 + 매핑 존재 확인
-  // 페이지 경계도 고려하면 좋음. 우선은 보수적으로 한 페이지 범위로 제한해도 OK(임시).
-  if (uaddr == NULL || !is_user_vaddr(uaddr) ||
-      pml4_get_page(thread_current()->pml4, uaddr) == NULL) {
-    sys_exit(-1);
+  if (size == 0) return;
+
+  const uint8_t *start = (const uint8_t *)uaddr;
+  const uint8_t *end   = start + size - 1;
+  if (end < start) sys_exit(-1);  // 오버플로 방지
+
+  // [start, end]가 걸치는 모든 페이지의 매핑 확인
+  for (const uint8_t *p = pg_round_down(start);
+       p <= pg_round_down(end);
+       p += PGSIZE) {
+    bad_addr(p);
   }
+}
+
+
+// 현재 스레드의 fds 리스트에서 fd에 대응하는 file* 찾기
+static struct file *fd_to_file_find(struct thread *t, int fd) {
+  if (fd < MIN_USER_FD || fd >= FD_MAX) return NULL;
+  for (struct list_elem *e = list_begin(&t->fds);
+      e != list_end(&t->fds); e = list_next(e)) {
+    struct fd_entry *ent = list_entry(e, struct fd_entry, elem);
+    if (ent->fd == fd) return ent->file;
+  }
+  return NULL;
 }
