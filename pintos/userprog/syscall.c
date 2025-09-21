@@ -178,7 +178,7 @@ static const syscall_handler_t syscall_tbl[] = {
     [SYS_HALT] = sys_halt,
     [SYS_EXIT] = sys_exit,
     [SYS_FORK] = sys_fork,
-    [SYS_EXEC] = NULL,
+    [SYS_EXEC] = sys_exec,
     [SYS_WAIT] = sys_wait,
     [SYS_CREATE] = sys_create,
     [SYS_REMOVE] = NULL,
@@ -416,33 +416,36 @@ static void sys_wait(struct intr_frame *f) {
   return;
 }
 
-// static void sys_exec(struct intr_frame *f) {
-//   const char *cmd_line = f->R.rdi;
-//   if (!validate_user_addr(cmd_line)) {
-//     sys_exit_with_error(f);
-//   }
-//   char *f_cmd_line = copy_in_string(cmd_line);
-//   if (copy_check(f_cmd_line) == 0) {
-//     f->R.rax = -1;
-//     return;
-//   }
+static void sys_exec(struct intr_frame *f) {
+  const char *cmd_line = f->R.rdi;
+  if (!validate_user_addr(cmd_line)) {
+    sys_exit_with_error(f);
+  }
+  char *f_cmd_line = copy_in_string(cmd_line);
+  if (copy_check(f_cmd_line) == 0) {
+    f->R.rax = -1;
+    return;
+  }
 
-//   /* 커맨드라인 복사용 임시 페이지 버퍼 */
-//   char *cmd_tmp = palloc_get_page(PAL_ZERO);
-//   if (cmd_tmp == NULL) {
-//     f->R.rax = -1;
-//     return;
-//   }
-//   strlcpy(cmd_tmp, f_cmd_line, PGSIZE);
-//   char *saveptr = NULL;
-//   char *file_name = strtok_r(cmd_tmp, "\t\r\n ", &saveptr);
-//   struct file *file = file_open(file_name);
-//   if (file == NULL) {
-//     printf("%s: -1\n", file_name);
-//     f->R.rax = -1;
-//     return;
-//   }
+  /* 커맨드라인 복사용 임시 페이지 버퍼 */
+  char *cmd_tmp = palloc_get_page(PAL_ZERO);
+  if (cmd_tmp == NULL) {
+    f->R.rax = -1;
+    return;
+  }
+  strlcpy(cmd_tmp, f_cmd_line, PGSIZE);
+  char *saveptr = NULL;
+  char *file_name = strtok_r(cmd_tmp, "\t\r\n ", &saveptr);
+  struct file *file = file_open(file_name);
+  if (file == NULL) {
+    printf("%s: -1\n", file_name);
+    f->R.rax = -1;
+    return;
+  }
 
-//   int status = process_exec((void *)f_cmd_line);
-//   f->R.rax = status;
-// }
+  int status = process_exec((void *)f_cmd_line);
+  if (status == -1) {
+    sys_exit_with_error(f);
+  }
+  f->R.rax = status;
+}
