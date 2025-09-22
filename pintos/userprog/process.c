@@ -203,7 +203,8 @@ static void __do_fork(void *aux) {
   /* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
   struct intr_frame *parent_if = fork_aux->parent_if;
   bool succ = true;
-
+  // 부모-자식 관계 리스트 연결
+  list_push_back(&parent->child_list, &current->child_elem);
   /* 1. CPU 컨텍스트를 로컬 스택(if_)으로 읽어온다. */
   memcpy(&if_, parent_if, sizeof(struct intr_frame));
   // 자식 RAX = 0 설정
@@ -238,8 +239,6 @@ static void __do_fork(void *aux) {
   process_init();
 
   if (succ) {
-    // 부모-자식 관계 리스트 연결
-    list_push_back(&parent->child_list, &current->child_elem);
     // 성공 여부
     fork_aux->succ_fork = true;
     // fork 기다리는 부모 프로세스 깨우기
@@ -298,7 +297,7 @@ int process_wait(tid_t child_tid UNUSED) {
 
   child = find_child(parent, child_tid);
 
-  if (child == NULL || child->is_waited) return -1;
+  if (child == NULL || child->is_waited || child->tid != child_tid) return -1;
 
   child->is_waited = true;
   // 자식이 끝날 때까지 wait

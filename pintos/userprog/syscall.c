@@ -230,7 +230,10 @@ static void sys_read(struct intr_frame *f) {
   // bad-fd 검사
   if (fd < 0 || fd > FD_MAX) return;
   // fd == 1 -> stdout
-  if (fd == 1) return;
+  if (fd == 1) {
+    f->R.rax = -1;
+    return;
+  }
 
   const void *buf = (const void *)f->R.rsi;
   unsigned size = (unsigned)f->R.rdx;
@@ -413,6 +416,7 @@ static void sys_fork(struct intr_frame *f) {
 static void sys_wait(struct intr_frame *f) {
   tid_t pid = f->R.rdi;  // 자식 프로세스 pid
   f->R.rax = process_wait(pid);
+  // f->R.rax = pid;
   return;
 }
 
@@ -446,6 +450,7 @@ static void sys_exec(struct intr_frame *f) {
   int status = process_exec((void *)f_cmd_line);
   if (status == -1) {
     sys_exit_with_error(f);
+    return;
   }
   f->R.rax = status;
 }
