@@ -51,6 +51,9 @@ process_init (void) {
 	struct thread *current = thread_current ();
 }
 
+static struct lock filesys_lock;         // 파일시스템 락(전역)
+
+
 /* Starts the first userland program, called "initd", loaded from FILE_NAME.
  * The new thread may be scheduled (and may even exit)
  * before process_create_initd() returns. Returns the initd's
@@ -351,6 +354,18 @@ static void __do_fork (void *aux) {
 		current->fd_table[fd] = cf;     // 성공: 자식 테이블의 같은 칸에 새 핸들을 꽂음
 	}
 
+//    /* 🅧 (3) ROX: 실행파일 핸들 복제 + deny-write (부모가 같은 ELF를 실행 중인 경우) */
+//     if(parent->running_file){
+// 		lock_acquire(&filesys_lock);
+
+// 		current->running_file = file_reopen(parent->running_file);      // 같은 inode를 가리키는 새 file 핸들 생성
+
+// 		if(current->running_file){
+// 			file_deny_write(current->running_file);
+// 		} 
+// 		lock_release(&filesys_lock);
+// 	}
+
 	// 6. 부모에게 “복제 끝!” 신호 보내기
 	fa->result = true;
     sema_up(&fa->done);
@@ -371,22 +386,33 @@ int process_exec (void *f_name) {
 	char *file_name = f_name;               // initd()가 넘겨준 fname(=palloc 페이지)       
 	bool success;
 
+	// // (4) 🅧 Rox 이전 실행파일 해제 (exec 전)
+	// struct thread *cur = thread_current();
+    // if (cur->running_file) {
+    //     lock_acquire(&filesys_lock);
+    //     file_allow_write(cur->running_file);
+    //     file_close(cur->running_file);
+    //     lock_release(&filesys_lock);
+    //     cur->running_file = NULL;
+    // }
+
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
 	 * it stores the execution information to the member. */
-	// 유저모드로 점프할 레지스터 세트를 담을 _if 준비
+	// 1. 유저모드 진입용 레지스터 세트를 담을 _if 준비
 	struct intr_frame _if;               
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
+	
+	// 2. 새 유저 주소공간을 위해 기존 커널/스레드 문맥 비우기(돌아갈 곳 사라짐!)
+	process_cleanup ();                       
 
-	process_cleanup ();                       // 기존 커널/스레드 문맥을 깨끗이 비우고 새 유저 주소공간을 올릴 준비
-
-	/* And then load the binary */
-	success = load (file_name, &_if);        // 성공 -> 실행 파일을 읽어 유저 주소공간에 매핑 + 스택 세팅 + rip/rsp까지 _if에 채움
+	// 3. 새 프로그램 로드(코드/데이터 매핑, 스택 구성, rip/rsp 채움)
+	success = load (file_name, &_if);   
 
 
-	/* 🚧 부모에게 로드 결과 통지(핸드셰이크) */
+	/* 🚧 4. 부모에게 로드 결과 통지(핸드셰이크) */
     struct thread *cur = thread_current();
     if (cur->as_child) {
        cur->as_child->load_success = success;
@@ -394,12 +420,17 @@ int process_exec (void *f_name) {
     }
     // 🚧
 
-	/* If load failed, 해제 */
+	/* 5-1. 실패 -> 즉시 종료(리턴X) */
 	palloc_free_page (file_name);
-	if (!success)
-		return -1;
-
-	/* Start switched process. */
+	if (!success){	    /*  이미 부모에게 load 결과 통지는 위에서 했으니 여기서 바로 종료해도 안전 */
+       printf("%s: exit(%d)\n", thread_name(), -1);   // 테스트가 요구하는 출력
+       thread_current()->exit_status = -1;            // 종료 코드 기록
+       thread_exit();                                 // 실제 종료
+       NOT_REACHED();
+	// return -1;                                     // 실패하면 return 금지 -> 페이지폴트(이미 주소공간을 지웠으므로 복귀 불가)
+}
+		
+	/* 5-2. 성공: 준비된 레지스터로 유저모드 점프(복귀 없음)*/
 	do_iret (&_if);           // 유저모드로 점프(do_iret)
 	NOT_REACHED ();           // 성공 시 커널로 돌아오지 않음
 }
@@ -454,6 +485,15 @@ void process_exit (void) {
         sema_up(&curr->as_child->wait_sema);                  // 시그널 보내기: 부모가 sema_down()에서 기다리는 걸 깨움
     }
     
+    // 🅧 (2) 실행 파일 rox 해제 + 닫기
+	// if(curr->running_file){
+	// 	lock_acquire(&filesys_lock);
+	// 	file_allow_write(curr->running_file);    // deny 카운터 -1
+	// 	file_close(curr->running_file);          // 핸들 달기
+	// 	lock_release(&filesys_lock);
+	// 	curr->running_file = NULL;
+	// }
+
     // 🆂 FD테이블 일괄 정리
 	for (int fd = FD_MIN; fd < FD_MAX; fd++){
 		if(curr->fd_table[fd]) sys_close(fd);
@@ -613,8 +653,6 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 	// 4) file_name 재지정
 	file_name = prog_name;                // 첫 토큰(프로그램 이름)
 
-
-
 	/* 실행 파일 오픈*/
 	file = filesys_open (file_name);
 	if (file == NULL) {
@@ -752,7 +790,7 @@ static bool load (const char *file_name, struct intr_frame *if_) {
     // rsp -= sizeof(uint64_t);
     // *(uint64_t *)rsp = (uint64_t)argc;
 
-    /*  fake return address (0) 푸시 */
+    /*  6) fake return address (0) 푸시 */
     if ((WOULD_UNDERFLOW(sizeof(uint64_t)))) goto done;
     rsp -= sizeof(uint64_t);
     *(uint64_t *)rsp = 0;  
@@ -768,13 +806,25 @@ static bool load (const char *file_name, struct intr_frame *if_) {
 
 	success = true;
 
+	/* 🅧 (1) 성공: 실행 파일 핸들 보관 + 쓰기 금지(ROX) */
+    t->running_file = file;
+    file_deny_write(file);
+
+    goto done;
+
 done:
-	/* We arrive here whether the load is successful or not. */
-	// file_close (file);
-	// return success;
-	if (file) file_close(file);             // 파일은 열렸을 때만 닫기
-    if (cmdline) palloc_free_page(cmdline); // 페이지는 할당됐을 때만 해제
+	// /* We arrive here whether the load is successful or not. */
+	// if (file) file_close(file);             // 파일은 열렸을 때만 닫기
+    // if (cmdline) palloc_free_page(cmdline); // 페이지는 할당됐을 때만 해제
+    // return success;
+	  /* 실패면 닫고, 성공이면 thread->running_file로 들고 감 */
+    if (!success && file) {
+       file_close(file);
+    //    t->running_file = NULL;
+    }
+    if (cmdline) palloc_free_page(cmdline);
     return success;
+
 }
 
 

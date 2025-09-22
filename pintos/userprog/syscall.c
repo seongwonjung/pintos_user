@@ -76,7 +76,7 @@ static char* copy_in_string_or_exit (const char *uaddr) {
       sys_exit(-1);
     }
 
-    /*안전하다고 판단 후 커널 버퍼에 복사*/    
+    /* 안전하다고 판단 후 커널 버퍼에 복사*/    
     kpage[i] = *p;                         
     if (kpage[i] == '\0') break;           // 문자열 끝(널문자)이면 복사 완료
     i++;                                   // 다음 글자로 이동
@@ -240,6 +240,7 @@ static int sys_read(int fd, void *buffer, unsigned size){
        ((uint8_t *)buffer)[i] = input_getc();     // 한 글자씩 키보드에서 읽어와 버퍼에 채움  
      return (int)i;                               // 읽은 바이트 수 반환
   }
+
   // 3. 일반 파일
   else{
     struct file *f = cur->fd_table[fd];
@@ -282,7 +283,6 @@ static int sys_write(int fd, const void *buffer, unsigned size){
   }
 }
 
-
 // 🅵 FORK(부모): 유저가 준 인자(프로세스 이름 등)를 안전하게 커널로 들여와 process_fork() 호출
 // fork 하기 -> (fork O)자식프로세스 생성 -> 그 자식 프로세스의 pid 반환
 static tid_t sys_fork(const char *thread_name){
@@ -304,6 +304,19 @@ static tid_t sys_fork(const char *thread_name){
 static int sys_wait (tid_t pid){
   return process_wait(pid);
 }
+
+
+// 🅴 지금 프로세스의 몸을 통째로 벗고, 새 프로그램으로 갈아입는 것. PID는 그대로, 내용만 전부 교체.
+static int sys_exec(const char *cmd_line){
+  // 유저 문자열 안전 복사 (잘못된 포인터면 내부에서 exit(-1))
+  char *kcmd = copy_in_string_or_exit(cmd_line);
+  int rc = process_exec(kcmd);
+
+  return rc;    //  현 구현 복귀X
+}
+
+
+
 
 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
@@ -365,6 +378,13 @@ void syscall_handler (struct intr_frame *f) {
       f->R.rax = (int)sys_wait((tid_t) f->R.rdi);           // 리턴값을 RAX에 실어줌
       break;
     }
+    
+    case SYS_EXEC: {
+      const char *cmd = (const char *) f->R.rdi;     // 유저 포인터
+      f->R.rax = (int) sys_exec(cmd);                // 성공: 자식 pid, 실패: -1
+      break;
+    }
+
     default:
       sys_exit(-1);      // 모르는 시스템콜 번호면 "프로세스 종료(-1)"로 처리
   }
