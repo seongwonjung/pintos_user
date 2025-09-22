@@ -17,7 +17,7 @@
 #include "threads/thread.h"
 #include "threads/mmu.h"
 #include "threads/vaddr.h"        
-#include "threads/malloc.h"    // 🚧 malloc (작은 구조체: struct child, struct start_info)
+#include "threads/malloc.h"     // 🚧 malloc (작은 구조체: struct child, struct start_info)
 #include "userprog/syscall.h"   // 
 #include "intrinsic.h"
 
@@ -50,8 +50,6 @@ static void
 process_init (void) {
 	struct thread *current = thread_current ();
 }
-
-static struct lock filesys_lock;         // 파일시스템 락(전역)
 
 
 /* Starts the first userland program, called "initd", loaded from FILE_NAME.
@@ -354,18 +352,6 @@ static void __do_fork (void *aux) {
 		current->fd_table[fd] = cf;     // 성공: 자식 테이블의 같은 칸에 새 핸들을 꽂음
 	}
 
-//    /* 🅧 (3) ROX: 실행파일 핸들 복제 + deny-write (부모가 같은 ELF를 실행 중인 경우) */
-//     if(parent->running_file){
-// 		lock_acquire(&filesys_lock);
-
-// 		current->running_file = file_reopen(parent->running_file);      // 같은 inode를 가리키는 새 file 핸들 생성
-
-// 		if(current->running_file){
-// 			file_deny_write(current->running_file);
-// 		} 
-// 		lock_release(&filesys_lock);
-// 	}
-
 	// 6. 부모에게 “복제 끝!” 신호 보내기
 	fa->result = true;
     sema_up(&fa->done);
@@ -386,15 +372,7 @@ int process_exec (void *f_name) {
 	char *file_name = f_name;               // initd()가 넘겨준 fname(=palloc 페이지)       
 	bool success;
 
-	// // (4) 🅧 Rox 이전 실행파일 해제 (exec 전)
-	// struct thread *cur = thread_current();
-    // if (cur->running_file) {
-    //     lock_acquire(&filesys_lock);
-    //     file_allow_write(cur->running_file);
-    //     file_close(cur->running_file);
-    //     lock_release(&filesys_lock);
-    //     cur->running_file = NULL;
-    // }
+	struct thread *cur = thread_current();
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
@@ -413,7 +391,7 @@ int process_exec (void *f_name) {
 
 
 	/* 🚧 4. 부모에게 로드 결과 통지(핸드셰이크) */
-    struct thread *cur = thread_current();
+    // struct thread *cur = thread_current();
     if (cur->as_child) {
        cur->as_child->load_success = success;
        sema_up(&cur->as_child->load_sema);                 //sema_up으로 부모의 sema_down(&load_sema)를 딱 한 번 깨움
@@ -477,7 +455,14 @@ void process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
-
+    
+	
+	 // 🅧 (2) 실행 파일 rox 해제 + 닫기
+	if(curr->running_file){
+		file_close(curr->running_file);          // 핸들 달기
+	}
+	
+	
 	 /* 🚧 부모에게 종료 알림 */
     if (curr->as_child) {                                     // 핸드셰이크 존재O
 		curr->as_child->exit_status = curr->exit_status;      // 데이터 쓰기: “내 종료코드”를 부모의 노드에 저장
@@ -485,14 +470,7 @@ void process_exit (void) {
         sema_up(&curr->as_child->wait_sema);                  // 시그널 보내기: 부모가 sema_down()에서 기다리는 걸 깨움
     }
     
-    // 🅧 (2) 실행 파일 rox 해제 + 닫기
-	// if(curr->running_file){
-	// 	lock_acquire(&filesys_lock);
-	// 	file_allow_write(curr->running_file);    // deny 카운터 -1
-	// 	file_close(curr->running_file);          // 핸들 달기
-	// 	lock_release(&filesys_lock);
-	// 	curr->running_file = NULL;
-	// }
+
 
     // 🆂 FD테이블 일괄 정리
 	for (int fd = FD_MIN; fd < FD_MAX; fd++){
@@ -820,7 +798,6 @@ done:
 	  /* 실패면 닫고, 성공이면 thread->running_file로 들고 감 */
     if (!success && file) {
        file_close(file);
-    //    t->running_file = NULL;
     }
     if (cmdline) palloc_free_page(cmdline);
     return success;

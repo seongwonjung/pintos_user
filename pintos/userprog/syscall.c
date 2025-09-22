@@ -16,11 +16,11 @@
 #include "threads/palloc.h"           // palloc_get_page(), palloc_free_page(), PGSIZE
 #include "threads/vaddr.h"            // is_user_vaddr()
 #include "threads/mmu.h"              // pml4_get_page()
-#include "filesys/filesys.h"          // filesys_create()
+#include "filesys/filesys.h"          // filesys_create(), remove()
 #include <string.h>                   // memcpy, strlen, strnlen 등
 #include "threads/synch.h"            // struct lock, lock_init(), lock_acquire(), lock_release()
 
-// 🅾, 🆂, 🆁
+// 🅾, 🆂, 🆁, tell
 #include "filesys/file.h"     // struct file, file_open(), file_close(), file_read()  (일반 파일에서 읽기 위해)
 
 // 🆁
@@ -30,6 +30,9 @@
 
 // 🅵
 #include "userprog/process.h"  // process_fork, process_wait, process_exit
+
+// halt
+#include "threads/init.h" 
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -315,7 +318,36 @@ static int sys_exec(const char *cmd_line){
   return rc;    //  현 구현 복귀X
 }
 
+// 한 파일 핸들(=FD)마다 “다음에 읽고/쓸 위치(오프셋)”를 기억
+//`seek(fd, pos):  이 오프셋을 `pos`(파일의 시작부터 바이트 단위)로 바꿔줌
+void sys_seek (int fd, unsigned position){
+  struct thread *t = thread_current();
+  if(fd < 0 || fd >= FD_MAX)  return;
+  if(t-> fd_table[fd] != NULL)
+    file_seek(t-> fd_table[fd], position);
+  return;
+}
 
+// 전원 끄기
+void halt (void){
+  power_off();      // 전원 꺼짐, 되돌아오지 않음
+}
+
+// 파일 삭제
+bool remove (const char *file){
+  if (!file) return false;
+  return filesys_remove(file);
+}
+
+// 현재 오프셋 반환
+unsigned tell (int fd){
+  struct thread *t = thread_current();
+
+  if(fd < FD_MIN || fd >= FD_MAX) return 0;
+  if(t->fd_table[fd] == NULL) return 0;
+
+  return (unsigned) file_tell(t->fd_table[fd]);          // 현재 파일 오프셋
+}
 
 
 
@@ -384,7 +416,31 @@ void syscall_handler (struct intr_frame *f) {
       f->R.rax = (int) sys_exec(cmd);                // 성공: 자식 pid, 실패: -1
       break;
     }
+    
+    case SYS_SEEK:{
+      int fd = (int)f->R.rdi;
+      unsigned position = (unsigned)f->R.rsi;
+      sys_seek (fd, position);
+      break;
+    }
 
+    case SYS_HALT:{
+      halt ();
+      break;
+    }
+
+    case SYS_REMOVE:{
+      const char *file = (const char *) f->R.rdi;
+      f->R.rax =  (bool) remove (file);
+      break;
+    }
+
+    case SYS_TELL:{
+      int fd = (int)f->R.rdi;
+      f->R.rax =  (unsigned) tell (fd);
+      break;
+    }
+    
     default:
       sys_exit(-1);      // 모르는 시스템콜 번호면 "프로세스 종료(-1)"로 처리
   }
