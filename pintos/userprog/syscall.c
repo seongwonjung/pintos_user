@@ -37,7 +37,7 @@
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
-static void sys_exit (int status);
+void sys_exit (int status);
 static int  sys_write (int fd, const void *buf, unsigned size);
 
 static struct lock filesys_lock;         // 파일시스템 락(전역)
@@ -130,7 +130,7 @@ void syscall_init (void) {
 
 // 🚧 sys_exit
 // “프로세스가 나 끝낼게요!”라고 말할 때 해야 할 일
-static void sys_exit (int status) {
+void sys_exit (int status) {
   struct thread *cur = thread_current();
   printf("%s: exit(%d)\n", thread_name(), status);   /* 테스트가 기대하는 종료 메시지 출력 */
   
@@ -233,6 +233,7 @@ static int sys_read(int fd, void *buffer, unsigned size){
   if (fd < 0 || fd >= FD_MAX) return -1;      // FD 범위 (실패)
   if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
   
+  
   // 2. 표준 입출력
   if(fd == 1) return -1;                          // STDOUT(출력)
   
@@ -264,8 +265,7 @@ static int sys_write(int fd, const void *buffer, unsigned size){
   if(size == 0) return 0;                            // 0바이트 -> 검사 필요X (즉시 통과)
   if (fd < 0 || fd >= FD_MAX) return -1;             // FD 범위 (실패)
   if (!buffer || !is_user_vaddr(buffer) || !pml4_get_page(cur->pml4, buffer)) sys_exit(-1);  // 버퍼 (종료)
-  
-  // 2. 표준 입출력
+
   if(fd == 0) return -1;                          // STDIN(입력)
   
   // STDOUT(출력) 
@@ -328,12 +328,12 @@ void sys_seek (int fd, unsigned position){
   return;
 }
 
-// 전원 끄기
+// 전체 시스템 전원 끄기
 void halt (void){
   power_off();      // 전원 꺼짐, 되돌아오지 않음
 }
 
-// 파일 삭제
+// 파일 시스템에서 이름 제거
 bool remove (const char *file){
   if (!file) return false;
   return filesys_remove(file);

@@ -127,7 +127,7 @@ struct thread {
   int exit_status;           // 종료 코드
 
   // 🚧 🅧 실행 파일(rox) 
-  struct file *running_file; // 실행 중인 ELF 파일 핸들(실행 중 write 금지/해제 위해 보관)
+  struct file *running_file; // 실행 중인 ELF 파일 핸들(deny_write 걸린 상태로 보관)
 
   // 🅾 스레드(=프로세스)별 FD 테이블
   struct file *fd_table[FD_MAX];   // FD번호 → 파일객체 매핑
