@@ -32,7 +32,7 @@ typedef int tid_t;
 #define PRI_MAX 63     /* Highest priority. */
 
 /* FD_MAX */
-#define FD_MAX 128
+#define FD_MAX 64
 
 /* A kernel thread or user process.
  *
@@ -109,6 +109,8 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
   struct list_elem allelem;
+  struct intr_frame fork_if;  // 부모 intr_frame 저장
+
 #ifdef USERPROG
   /* Owned by userprog/process.c. */
   uint64_t *pml4;               /* Page map level 4 */
@@ -120,6 +122,8 @@ struct thread {
   /* FD 관련 필드 */
   struct file *fd_table[FD_MAX];
   int next_fd;
+  /* 실행중인 ELF 파일 */
+  struct file *running_file;
 #endif
 #ifdef VM
   /* Table for whole virtual memory owned by thread. */

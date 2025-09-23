@@ -52,6 +52,7 @@ static struct thread *find_child(struct thread *parent, tid_t child_tid) {
       return child;
     }
   }
+  return NULL;
 }
 
 /* General process initializer for initd and other process. */
@@ -164,14 +165,14 @@ static bool duplicate_pte(uint64_t *pte, void *va, void *aux) {
   /* 2. 부모의 PML4에서 VA에 해당하는 실제 페이지 주소를 얻습니다. */
   parent_page = pml4_get_page(parent->pml4, va);
   if (parent_page == NULL) {
-    printf("Debug: parent page for VA %p not found\n", va);
+    // printf("Debug: parent page for VA %p not found\n", va);
     return true;
   }
   /* 3. TODO: 자식용으로 PAL_USER 플래그로 새 페이지를 할당하고,
    *    TODO: 결과 주소를 NEWPAGE에 저장합니다. */
   newpage = palloc_get_page(PAL_USER);
   if (newpage == NULL) {
-    printf("Debug: palloc failed for child page\n");
+    // printf("Debug: palloc failed for child page\n");
     return false;
   }
   /* 4. TODO: 부모 페이지의 내용을 새 페이지로 복사하고,
@@ -183,7 +184,7 @@ static bool duplicate_pte(uint64_t *pte, void *va, void *aux) {
    * 매핑합니다. */
   if (!pml4_set_page(current->pml4, va, newpage, writable)) {
     /* 6. TODO: 페이지 매핑 삽입에 실패한 경우 에러 처리를 수행합니다. */
-    printf("Debug: pml4_set_page failed for child\n");
+    // printf("Debug: pml4_set_page failed for child\n");
     palloc_free_page(newpage);
     return false;
   }
@@ -310,14 +311,19 @@ int process_wait(tid_t child_tid UNUSED) {
 /* 프로세스를 종료합니다. 이 함수는 thread_exit()에 의해 호출됩니다. */
 void process_exit(void) {
   struct thread *curr = thread_current();
+  if (curr->running_file) {
+    file_close(curr->running_file);
+    curr->running_file = NULL;
+  }
+  // file_allow_write(curr->running_file);
   /* TODO: 여기에 코드를 작성하세요.
    * TODO: 프로세스 종료 메시지를 구현하세요
    * TODO: (project2/process_termination.html 참고).
    * TODO: 프로세스 자원 정리를 이곳에서 구현할 것을 권장합니다. */
-  for (int i = 2; i < FD_MAX; i++) {
+  for (int i = 0; i < FD_MAX; i++) {
     if (curr->fd_table[i]) fd_close(curr, i);
   }
-  printf("%s: exit(%d)\n", thread_name(), curr->exit_status);
+
   sema_up(&curr->wait_sema);
   process_cleanup();
 }
@@ -517,9 +523,11 @@ static bool load(const char *file_name, struct intr_frame *if_) {
 
   /* Open executable file.
   실행 파일 열기 */
+  lock_acquire(&filesys_lock);
   file = filesys_open(file_name);
+  lock_release(&filesys_lock);
   if (file == NULL) {
-    printf("load: %s: open failed\n", file_name);
+    // printf("load: %s: open failed\n", file_name);
     goto done;
   }
 
@@ -530,7 +538,7 @@ static bool load(const char *file_name, struct intr_frame *if_) {
       ehdr.e_machine != 0x3E  // amd64
       || ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Phdr) ||
       ehdr.e_phnum > 1024) {
-    printf("load: %s: error loading executable\n", file_name);
+    // printf("load: %s: error loading executable\n", file_name);
     goto done;
   }
 
@@ -600,10 +608,11 @@ static bool load(const char *file_name, struct intr_frame *if_) {
   build_user_stack(if_, argv, argc);
 
   success = true;
+  t->running_file = file;
+  file_deny_write(file);
 done:
   /* We arrive here whether the load is successful or not. */
   /* 정리: 파일 닫기, 임시 페이지 해제 */
-  file_close(file);
   palloc_free_page(cmd_tmp);
   return success;
 }
