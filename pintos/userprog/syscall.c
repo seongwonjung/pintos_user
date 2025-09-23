@@ -20,7 +20,7 @@
 #include <string.h>                   // memcpy, strlen, strnlen 등
 #include "threads/synch.h"            // struct lock, lock_init(), lock_acquire(), lock_release()
 
-// 🅾, 🆂, 🆁, tell
+// 🅾, 🆂, 🆁, 🆃
 #include "filesys/file.h"     // struct file, file_open(), file_close(), file_read()  (일반 파일에서 읽기 위해)
 
 // 🆁
@@ -31,14 +31,14 @@
 // 🅵
 #include "userprog/process.h"  // process_fork, process_wait, process_exit
 
-// halt
+// 🅷
 #include "threads/init.h" 
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
 void sys_exit (int status);
-static int  sys_write (int fd, const void *buf, unsigned size);
+static int sys_write (int fd, const void *buf, unsigned size);
 
 static struct lock filesys_lock;         // 파일시스템 락(전역)
 
@@ -54,7 +54,6 @@ static struct lock filesys_lock;         // 파일시스템 락(전역)
 #define MSR_STAR 0xc0000081         /* Segment selector msr */
 #define MSR_LSTAR 0xc0000082        /* Long mode SYSCALL target */
 #define MSR_SYSCALL_MASK 0xc0000084 /* Mask for the eflags */
-
 
 // 🅲 CREATE 헬퍼: 유저 문자열을 커널 페이지로 안전 복사
 //  - 성공: palloc 페이지(4KB)에 NULL-terminated로 복사하여 포인터 반환
@@ -138,7 +137,6 @@ void sys_exit (int status) {
   thread_exit();                                   // 커널 스레드 종료
 }
 
-// 🚧
 
 // 🅲 CREATE: sys_create
   //  ufile == NULL / bad ptr / kernel addr  -> exit(-1)
@@ -156,6 +154,7 @@ static int sys_create (const char *ufile, unsigned initial_size) {
   palloc_free_page(kname);           // 커널 버퍼(4KB) 를 꼭 반납
   return ok;                         // 0(실패), 1(성공) 값을 반환
 }
+
 
 // 🅾 OPEN
 static int sys_open(const char *ufile){
@@ -207,6 +206,7 @@ void sys_close(int fd){
   lock_release(&filesys_lock);
 }
 
+
 // 🆁 🆆 헬퍼(파일 사이즈)
 int filesize(int fd){
     if(fd < 0 || fd >= FD_MAX){
@@ -222,6 +222,7 @@ int filesize(int fd){
     lock_release(&filesys_lock);
     return size;
 }
+
 
 // 🆁 READ
 static int sys_read(int fd, void *buffer, unsigned size){
@@ -257,6 +258,7 @@ static int sys_read(int fd, void *buffer, unsigned size){
   }
 }
 
+
 // 🆆 WRITE
 static int sys_write(int fd, const void *buffer, unsigned size){
   struct thread *cur = thread_current();
@@ -285,6 +287,7 @@ static int sys_write(int fd, const void *buffer, unsigned size){
     return nwrite;
   }
 }
+
 
 // 🅵 FORK(부모): 유저가 준 인자(프로세스 이름 등)를 안전하게 커널로 들여와 process_fork() 호출
 // fork 하기 -> (fork O)자식프로세스 생성 -> 그 자식 프로세스의 pid 반환
@@ -318,8 +321,9 @@ static int sys_exec(const char *cmd_line){
   return rc;    //  현 구현 복귀X
 }
 
+
 // 한 파일 핸들(=FD)마다 “다음에 읽고/쓸 위치(오프셋)”를 기억
-//`seek(fd, pos):  이 오프셋을 `pos`(파일의 시작부터 바이트 단위)로 바꿔줌
+// seek(fd, pos):  이 오프셋을 `pos`(파일의 시작부터 바이트 단위)로 바꿔줌
 void sys_seek (int fd, unsigned position){
   struct thread *t = thread_current();
   if(fd < 0 || fd >= FD_MAX)  return;
@@ -328,7 +332,7 @@ void sys_seek (int fd, unsigned position){
   return;
 }
 
-// 전체 시스템 전원 끄기
+// 🅷 전체 시스템 전원 끄기
 void halt (void){
   power_off();      // 전원 꺼짐, 되돌아오지 않음
 }
@@ -339,7 +343,7 @@ bool remove (const char *file){
   return filesys_remove(file);
 }
 
-// 현재 오프셋 반환
+// 🆃 현재 오프셋 반환
 unsigned tell (int fd){
   struct thread *t = thread_current();
 
@@ -350,7 +354,8 @@ unsigned tell (int fd){
 }
 
 
-
+/* The main system call interface */
+// TODO: Your implementation goes here.// 
 // 유저 프로그램이 syscall을 부르면, 무슨 번호인지 보고 맞는 함수로 보내기
 void syscall_handler (struct intr_frame *f) {
   uint64_t num = f->R.rax;                    // 시스템콜 번호(RAX 확인)
@@ -363,7 +368,7 @@ void syscall_handler (struct intr_frame *f) {
     case SYS_CREATE: {
       const char *ufile = (const char *)f->R.rdi;      // RDI: 1번째 인자 → filename 포인터
       unsigned size = (unsigned)f->R.rsi;              // RSI: 2번째 인자 → size
-      f->R.rax = (uint64_t)sys_create(ufile, size);
+      f->R.rax = (int)sys_create(ufile, size);
       break;
     }
 
@@ -402,7 +407,7 @@ void syscall_handler (struct intr_frame *f) {
    case SYS_FORK: {
       thread_current()->fork_if = *f;                       // ★ 부모 유저 프레임 복사  
       const char *thread_name = (const char *)f->R.rdi;     // RDI: 1번째 인자 → 이름 포인터
-      f->R.rax = (uint64_t)sys_fork(thread_name);           // 리턴값을 RAX에 실어줌
+      f->R.rax = (tid_t)sys_fork(thread_name);           // 리턴값을 RAX에 실어줌
       break;
     }
 
@@ -431,7 +436,7 @@ void syscall_handler (struct intr_frame *f) {
 
     case SYS_REMOVE:{
       const char *file = (const char *) f->R.rdi;
-      f->R.rax =  (bool) remove (file);
+      f->R.rax =  (bool)remove (file);
       break;
     }
 
@@ -450,30 +455,3 @@ void syscall_handler (struct intr_frame *f) {
 
 
 
-/* The main system call interface */
-// TODO: Your implementation goes here.
-// typedef void(*syscall_handler_t)(
-//   struct intr_frame *f);                  // 함수 포인트형 재선언
-// )
-// typedef const syscall_handler_t syscall_tbl[] = {
-//   NULL,
-//   sys_exit,
-//   NULL,
-//   NULL,
-//   NULL,
-//   NULL,
-//   NULL,
-//   NULL,
-//   NULL,
-//   NULL,
-//   sys_write,
-//   NULL,
-//   NULL,
-//   NULL,
-// };
-
-// void syscall_handler (struct intr_frame *f UNUSED) {	
-	
-// 	printf ("system call!\n");
-// 	thread_exit ();
-// }

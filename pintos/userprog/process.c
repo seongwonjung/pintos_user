@@ -249,15 +249,12 @@ static bool duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	newpage = palloc_get_page(PAL_USER);
     if (newpage == NULL) return false;
 
-	/* 4. TODO: Duplicate parent's page to the new page and
-	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
+	/* 4. TODO: Duplicate parent's page to the new page and check whether parent's page is writable or not (set WRITABLE according to the result). */
 	/* 4) 내용 복제 + writable 비트 반영 */
     memcpy(newpage, parent_page, PGSIZE);
     writable = (*pte & PTE_W) != 0;
 
-	/* 5. Add new page to child's page table at address VA with WRITABLE
-	 *    permission. */
+	/* 5. Add new page to child's page table at address VA with WRITABLE permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
 		/* 6) 매핑 실패 시 해제 */
@@ -747,7 +744,7 @@ static bool load (const char *file_name, struct intr_frame *if_) {
     rsp -= sizeof(char *);                          // 8바이트 내림
     *(char **)rsp = NULL;                           // 해당 자리에 0(널 포인터) 삽입
 
-    /// 5) argv[i] 포인터들(역순으로 푸시: 마지막 → 첫 번째)
+    // 5) argv[i] 포인터들(역순으로 푸시: 마지막 → 첫 번째)
 	for (int i = argc - 1; i >= 0; i--) {
 		if (WOULD_UNDERFLOW(sizeof(char*)))  goto done;
 		
@@ -795,13 +792,13 @@ done:
 	// if (file) file_close(file);             // 파일은 열렸을 때만 닫기
     // if (cmdline) palloc_free_page(cmdline); // 페이지는 할당됐을 때만 해제
     // return success;
-	  /* 실패면 닫고, 성공이면 thread->running_file로 들고 감 */
+	
+	/* 실패면 닫고, 성공이면 thread->running_file로 들고 감 */
     if (!success && file) {
        file_close(file);
     }
     if (cmdline) palloc_free_page(cmdline);
     return success;
-
 }
 
 
@@ -943,8 +940,7 @@ static bool
 install_page (void *upage, void *kpage, bool writable) {
 	struct thread *t = thread_current ();
 
-	/* Verify that there's not already a page at that virtual
-	 * address, then map our page there. */
+	/* Verify that there's not already a page at that virtual address, then map our page there. */
 	return (pml4_get_page (t->pml4, upage) == NULL
 			&& pml4_set_page (t->pml4, upage, kpage, writable));
 }
