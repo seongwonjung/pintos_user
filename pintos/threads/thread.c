@@ -394,10 +394,8 @@ void thread_yield(void) {
   old_level = intr_disable();
 
   if (curr != idle_thread)
-    list_insert_ordered(
-        &ready_list, &curr->elem, cmp_priority,
-        NULL);  // 2️⃣ 자발적 양보: 내림차순 => ready_list:
-                // 내림차순 list_push_back (&ready_list, &curr->elem);
+    list_insert_ordered(&ready_list, &curr->elem, cmp_priority,NULL);  // 2️⃣ 자발적 양보: 내림차순 => ready_list:
+  // 내림차순 list_push_back (&ready_list, &curr->elem);
   do_schedule(THREAD_READY);
   intr_set_level(old_level);
 }

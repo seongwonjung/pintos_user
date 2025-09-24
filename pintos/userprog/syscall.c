@@ -40,7 +40,7 @@ void syscall_handler (struct intr_frame *);
 void sys_exit (int status);
 static int sys_write (int fd, const void *buf, unsigned size);
 
-static struct lock filesys_lock;         // 파일시스템 락(전역)
+struct lock filesys_lock;         // 파일시스템 락(전역)
 
 /* System call.
  *
@@ -99,16 +99,12 @@ static int fd_install(struct thread *t, struct file *f){
   for(int fd = FD_MIN; fd < FD_MAX; fd++){            
     if(t->fd_table[fd] == NULL){          // NULL이면 아직 아무 파일도 안 꽂혀 있음 → 사용 가능한 슬롯
       t->fd_table[fd] = f;
-      // t->fd_next = fd + 1;
-    // if(t->fd_next >= FD_MAX) t->fd_next = FD_MIN;      // 예외 처리(랩어라운드)  
     
-    return fd;         // 성공 -> fd번호 반환
+    return fd;          // 성공 -> fd번호 반환
     } 
   }
   return -1;            // 실패
 }
-
-
 
 
 void syscall_init (void) {
@@ -327,6 +323,14 @@ static int sys_exec(const char *cmd_line){
 void sys_seek (int fd, unsigned position){
   struct thread *t = thread_current();
   if(fd < 0 || fd >= FD_MAX)  return;
+  
+  // //❗
+  // struct file *f = t->fd_table[fd];
+  // if(!f) return;
+  // lock_acquire(&filesys_lock);
+  // file_seek(f, position);
+  // lock_release(&filesys_lock);
+
   if(t-> fd_table[fd] != NULL)
     file_seek(t-> fd_table[fd], position);
   return;
@@ -348,8 +352,16 @@ unsigned tell (int fd){
   struct thread *t = thread_current();
 
   if(fd < FD_MIN || fd >= FD_MAX) return 0;
-  if(t->fd_table[fd] == NULL) return 0;
 
+  // //❗
+  // struct file *f = t->fd_table[fd];
+  // if(!f) return 0;
+  // lock_acquire(&filesys_lock);
+  // unsigned ofs = (unsigned)file_tell(f);
+  // lock_release(&filesys_lock);
+  // return ofs;
+
+  if(t->fd_table[fd] == NULL) return 0;
   return (unsigned) file_tell(t->fd_table[fd]);          // 현재 파일 오프셋
 }
 

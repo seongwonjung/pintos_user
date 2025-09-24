@@ -131,7 +131,7 @@ struct thread {
 
   // 🅾 스레드(=프로세스)별 FD 테이블
   struct file *fd_table[FD_MAX];   // FD번호 → 파일객체 매핑
-  int fd_next;                     // 다음 탐색 시작 위치   
+  // int fd_next;                     // 다음 탐색 시작 위치   
 
   /* 주소 공간 */
   uint64_t *pml4; /* Page map level 4 */

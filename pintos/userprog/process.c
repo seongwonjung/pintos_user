@@ -349,6 +349,7 @@ static void __do_fork (void *aux) {
 		current->fd_table[fd] = cf;     // 성공: 자식 테이블의 같은 칸에 새 핸들을 꽂음
 	}
 
+
 	// 6. 부모에게 “복제 끝!” 신호 보내기
 	fa->result = true;
     sema_up(&fa->done);
